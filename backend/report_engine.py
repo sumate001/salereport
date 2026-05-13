@@ -43,6 +43,12 @@ class IntraCol:
     COUNTRY   = 6   # Country
     EXP_DATE  = 27  # วันหมดอายุ (E-Book)
     SELL_OFF  = 28  # SellOffPeriod (Book)
+    # Tiered royalty rate columns Q–Z (0-based)
+    RT1_TEXT  = 16;  RT1_PRICE = 17
+    RT2_TEXT  = 18;  RT2_PRICE = 19
+    RT3_TEXT  = 20;  RT3_PRICE = 21
+    RT4_TEXT  = 22;  RT4_PRICE = 23
+    RT5_TEXT  = 24;  RT5_PRICE = 25
     # ISBNs: BookTH01–BookTH10 at cols 39–48 (auto-detected)
 
 
@@ -76,6 +82,26 @@ def normalize_rate(rate):
     return r / 100 if r > 1 else r
 
 
+def format_date_printed(val):
+    """แปลง date เป็น 'May 31' format"""
+    if val is None:
+        return ''
+    if isinstance(val, datetime):
+        return val.strftime('%b %d')
+    if hasattr(val, 'strftime'):
+        return val.strftime('%b %d')
+    s = safe_str(val)
+    if not s:
+        return ''
+    try:
+        dt = pd.to_datetime(s)
+        if pd.notna(dt):
+            return dt.strftime('%b %d')
+    except Exception:
+        pass
+    return s
+
+
 def extract_year(val):
     """ดึงปี ค.ศ. จาก cell ที่อาจเป็น date, int, float หรือ string"""
     if val is None:
@@ -96,6 +122,50 @@ def extract_year(val):
 
 def report_year_from_period(period: str) -> int:
     return 2025
+
+
+def parse_rt_tiers(intra_row):
+    """Parse rt1–rt5 tier columns from Intra row.
+    Returns list of (min_copy, max_copy, rate) — rate normalized 0–1.
+    'a' alone (no digits) or rate=0 → skipped.
+    """
+    if intra_row is None:
+        return []
+
+    RT_COLS = [
+        (IntraCol.RT1_TEXT, IntraCol.RT1_PRICE),
+        (IntraCol.RT2_TEXT, IntraCol.RT2_PRICE),
+        (IntraCol.RT3_TEXT, IntraCol.RT3_PRICE),
+        (IntraCol.RT4_TEXT, IntraCol.RT4_PRICE),
+        (IntraCol.RT5_TEXT, IntraCol.RT5_PRICE),
+    ]
+
+    tiers = []
+    for text_col, price_col in RT_COLS:
+        try:
+            rt_text  = safe_str(intra_row.iloc[text_col]).strip()
+            rt_price = safe_float(intra_row.iloc[price_col])
+        except (IndexError, KeyError):
+            break
+        if not rt_text or rt_price == 0:
+            continue
+        m_range = re.match(r'a(\d+)-(\d+)', rt_text, re.IGNORECASE)
+        m_from  = re.match(r'a(\d+)$',      rt_text, re.IGNORECASE)
+        if m_range:
+            tiers.append((int(m_range.group(1)), int(m_range.group(2)), normalize_rate(rt_price)))
+        elif m_from:
+            tiers.append((int(m_from.group(1)), float('inf'), normalize_rate(rt_price)))
+    return tiers
+
+
+def apply_rt_tiers(copies_sold, tiers):
+    """Split copies_sold across tiers. Returns [(copies_in_tier, rate), ...] for tiers with copies > 0."""
+    result = []
+    for min_c, max_c, rate in tiers:
+        c = max(0.0, min(copies_sold, max_c) - (min_c - 1))
+        if c > 0:
+            result.append((c, rate))
+    return result
 
 
 # ─── ReportEngine ─────────────────────────────────────────────────────────────
@@ -240,18 +310,22 @@ class ReportEngine:
 
             job      = safe_str(r.iloc[ItemCol.JOB])
             is_ebook = job.upper().startswith('EB/')
-            title    = safe_str(r.iloc[ItemCol.TITLE_TH])
-            isbn     = safe_str(r.iloc[ItemCol.ISBN])
-            date_prt = r.iloc[ItemCol.DATE_PRINTED]
-            copies_prt = safe_float(r.iloc[ItemCol.COPIES_PRINTED])
-            retail   = safe_float(r.iloc[ItemCol.PRICE])
-            rate     = normalize_rate(r.iloc[ItemCol.ROYALTY_RATE])
-            currency = safe_str(r.iloc[ItemCol.PAYMENT_CURRENCY]) or 'USD'
-            adv      = safe_float(r.iloc[ItemCol.ADV])
-            adv_cur  = safe_str(r.iloc[ItemCol.ADV_CURRENCY])
-
-            status_2024  = safe_str(r.iloc[ItemCol.STATUS_2024])
-            prev_balance = safe_float(r.iloc[ItemCol.PREV_BALANCE]) if status_2024 == 'จ่ายแล้ว' else 0.0
+            title_th = safe_str(r.iloc[ItemCol.TITLE_TH])
+            title_en = safe_str(r.iloc[ItemCol.TITLE_EN])
+            if title_th and title_en:
+                title = f"{title_th}\n{title_en}"
+            else:
+                title = title_th or title_en
+            isbn           = safe_str(r.iloc[ItemCol.ISBN])
+            date_prt       = format_date_printed(r.iloc[ItemCol.DATE_PRINTED])
+            copies_prt     = safe_float(r.iloc[ItemCol.COPIES_PRINTED])
+            retail         = safe_float(r.iloc[ItemCol.PRICE])
+            fallback_rate  = normalize_rate(r.iloc[ItemCol.ROYALTY_RATE])
+            currency       = safe_str(r.iloc[ItemCol.PAYMENT_CURRENCY]) or 'USD'
+            adv            = safe_float(r.iloc[ItemCol.ADV])
+            adv_cur        = safe_str(r.iloc[ItemCol.ADV_CURRENCY])
+            status_2024    = safe_str(r.iloc[ItemCol.STATUS_2024])
+            prev_balance   = safe_float(r.iloc[ItemCol.PREV_BALANCE]) if status_2024 == 'จ่ายแล้ว' else 0.0
 
             if period == 'bi1':
                 copies_sold = safe_float(r.iloc[ItemCol.BI_H1_AMARIN]) + safe_float(r.iloc[ItemCol.BI_H1_ABOOK])
@@ -260,28 +334,38 @@ class ReportEngine:
             else:
                 copies_sold = safe_float(r.iloc[ItemCol.ANNUAL_SOLD])
 
-            amount_thb = copies_sold * retail * rate
-            ex_rate    = self.get_rate(currency, period)
-            amount_ccy = amount_thb / ex_rate if ex_rate else 0.0
+            ex_rate   = self.get_rate(currency, period)
+            intra_row = self._find_intra_row(r)
+            tiers     = parse_rt_tiers(intra_row)
+            tier_rows = apply_rt_tiers(copies_sold, tiers)
 
-            rows.append({
-                'job':            job,
-                'isbn':           isbn,
-                'title':          title,
-                'copies_printed': copies_prt,
-                'date_printed':   date_prt,
-                'retail_price':   retail,
-                'royalty_rate':   rate,
-                'copies_sold':    copies_sold,
-                'amount_thb':     amount_thb,
-                'amount_ccy':     amount_ccy,
-                'currency':       currency,
-                'adv':            adv,
-                'adv_currency':   adv_cur,
-                'prev_balance':   prev_balance,
-                'is_ebook':       is_ebook,
-                'ex_rate':        ex_rate,
-            })
+            def make_row(tc, tr, first):
+                amt_thb = tc * retail * tr
+                return {
+                    'job':            job           if first else '',
+                    'isbn':           isbn          if first else None,
+                    'title':          title         if first else '',
+                    'copies_printed': copies_prt    if first else None,
+                    'date_printed':   date_prt      if first else '',
+                    'retail_price':   retail        if first else None,
+                    'royalty_rate':   tr,
+                    'copies_sold':    tc,
+                    'amount_thb':     amt_thb,
+                    'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
+                    'currency':       currency,
+                    'adv':            adv           if first else 0.0,
+                    'adv_currency':   adv_cur,
+                    'prev_balance':   prev_balance  if first else 0.0,
+                    'is_ebook':       is_ebook,
+                    'ex_rate':        ex_rate,
+                }
+
+            if tier_rows:
+                for i, (tc, tr) in enumerate(tier_rows):
+                    rows.append(make_row(tc, tr, first=(i == 0)))
+            else:
+                rows.append(make_row(copies_sold, fallback_rate, first=True))
+
         return rows
 
     # ── Main generate ─────────────────────────────────────────────────────────
@@ -441,11 +525,15 @@ class ReportEngine:
             row += 1
 
         # ── Rows 7-9: column headers ──────────────────────────────────────────
+        all_rows_combined = bi1_rows + bi2_rows + an_rows
+        raw_ccy = next((r['currency'] for r in all_rows_combined if r.get('currency')), 'CCY')
+        ccy_label = 'JPY' if raw_ccy == 'JYP' else raw_ccy
+
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
-             'AMOUNT',  'AMOUNT',  'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF'],
+             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF'],
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
-             '(THB)',   '(CCY)',   'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD'],
+             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
              '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES'],
         ]
