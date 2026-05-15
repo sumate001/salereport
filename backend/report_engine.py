@@ -33,6 +33,7 @@ class ItemCol:
     ANNUAL_SOLD      = 44
     PREV_BALANCE     = 72
     STATUS_2024      = 73
+    STOCK_ACCOUNT    = 79
 
 
 class IntraCol:
@@ -312,12 +313,11 @@ class ReportEngine:
             is_ebook = job.upper().startswith('EB/')
             title_th = safe_str(r.iloc[ItemCol.TITLE_TH])
             title_en = safe_str(r.iloc[ItemCol.TITLE_EN])
-            if title_th and title_en:
-                title = f"{title_th}\n{title_en}"
-            else:
-                title = title_th or title_en
+            title_display = title_en or title_th
+            title_th_sub  = title_th if title_en else ''
             isbn           = safe_str(r.iloc[ItemCol.ISBN])
             date_prt       = format_date_printed(r.iloc[ItemCol.DATE_PRINTED])
+            date_year      = extract_year(r.iloc[ItemCol.DATE_PRINTED])
             copies_prt     = safe_float(r.iloc[ItemCol.COPIES_PRINTED])
             retail         = safe_float(r.iloc[ItemCol.PRICE])
             fallback_rate  = normalize_rate(r.iloc[ItemCol.ROYALTY_RATE])
@@ -325,7 +325,9 @@ class ReportEngine:
             adv            = safe_float(r.iloc[ItemCol.ADV])
             adv_cur        = safe_str(r.iloc[ItemCol.ADV_CURRENCY])
             status_2024    = safe_str(r.iloc[ItemCol.STATUS_2024])
-            prev_balance   = safe_float(r.iloc[ItemCol.PREV_BALANCE]) if status_2024 == 'จ่ายแล้ว' else 0.0
+            prev_balance   = safe_float(r.iloc[ItemCol.PREV_BALANCE])
+            balance_paid   = safe_float(r.iloc[ItemCol.PREV_BALANCE]) if status_2024 == 'จ่ายแล้ว' else 0.0
+            stock_account  = safe_float(r.iloc[ItemCol.STOCK_ACCOUNT])
 
             if period == 'bi1':
                 copies_sold = safe_float(r.iloc[ItemCol.BI_H1_AMARIN]) + safe_float(r.iloc[ItemCol.BI_H1_ABOOK])
@@ -344,7 +346,8 @@ class ReportEngine:
                 return {
                     'job':            job           if first else '',
                     'isbn':           isbn          if first else None,
-                    'title':          title         if first else '',
+                    'title':          title_display if first else '',
+                    'title_th':       title_th_sub  if first else '',
                     'copies_printed': copies_prt    if first else None,
                     'date_printed':   date_prt      if first else '',
                     'retail_price':   retail        if first else None,
@@ -356,15 +359,32 @@ class ReportEngine:
                     'adv':            adv           if first else 0.0,
                     'adv_currency':   adv_cur,
                     'prev_balance':   prev_balance  if first else 0.0,
+                    'balance_paid':   balance_paid  if first else 0.0,
+                    'period_balance': None,
+                    'unsold_copies':  None,
+                    'stock_account':  stock_account if first else None,
                     'is_ebook':       is_ebook,
                     'ex_rate':        ex_rate,
                 }
 
+            item_rows = []
             if tier_rows:
                 for i, (tc, tr) in enumerate(tier_rows):
-                    rows.append(make_row(tc, tr, first=(i == 0)))
+                    item_rows.append(make_row(tc, tr, first=(i == 0)))
             else:
-                rows.append(make_row(copies_sold, fallback_rate, first=True))
+                item_rows.append(make_row(copies_sold, fallback_rate, first=True))
+
+            if item_rows:
+                first_row = item_rows[0]
+                if prev_balance > 0:
+                    total_thb_item = sum(d['amount_thb'] for d in item_rows)
+                    total_ccy_item = sum(d['amount_ccy'] for d in item_rows)
+                    amount_for_period = total_thb_item if adv_cur == 'THB' else total_ccy_item
+                    first_row['period_balance'] = prev_balance - amount_for_period + balance_paid
+                if date_year == report_year_from_period(period) and copies_prt > 0:
+                    first_row['unsold_copies'] = max(0.0, copies_prt - copies_sold)
+
+            rows.extend(item_rows)
 
         return rows
 
@@ -519,7 +539,7 @@ class ReportEngine:
 
         # ── Rows 1-6: header block ────────────────────────────────────────────
         row = 1
-        for txt in ['SALES REPORT', 'KADOKAWA CORPORATION', agency,
+        for txt in ['SALES REPORT', publisher, agency,
                     publisher, type_mark, period_end]:
             ws.cell(row=row, column=3, value=txt).font = f(10, bold=(row <= 2))
             row += 1
@@ -531,11 +551,11 @@ class ReportEngine:
 
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
-             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF'],
+             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'STOCK'],
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
-             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD'],
+             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', '(เล่ม)'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
-             '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES'],
+             '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES', 'คงเหลือ Account'],
         ]
         for hdr in hdr_rows:
             for c_idx, val in enumerate(hdr, 1):
@@ -554,8 +574,8 @@ class ReportEngine:
             ws.cell(row=row, column=1, value=label).font = f(9, bold=True)
             ws.cell(row=row, column=1).fill = SEC_FILL
             ws.cell(row=row, column=1).alignment = lft
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=15)
-            for c in range(1, 16):
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=16)
+            for c in range(1, 17):
                 ws.cell(row=row, column=c).border = bdr
             row += 1
 
@@ -588,9 +608,10 @@ class ReportEngine:
                 put(10, d['amount_ccy']     or None,       NUM)
                 put(11, d['adv']            or None,       NUM)
                 put(12, d['prev_balance']   or None,       NUM)
-                put(13, None)
-                put(14, None)
-                put(15, None)
+                put(13, d['balance_paid']   or None,       NUM)
+                put(14, d['period_balance'],               NUM)
+                put(15, d['unsold_copies'],                NUM)
+                put(16, d['stock_account']  or None,       NUM)
 
                 total_thb   += d['amount_thb']
                 total_ccy   += d['amount_ccy']
@@ -598,13 +619,20 @@ class ReportEngine:
                 ccy_used     = d['currency']
                 row += 1
 
+                if d.get('title_th'):
+                    put(3, d['title_th'], align=lft)
+                    for c in range(1, 17):
+                        if c != 3:
+                            ws.cell(row=row, column=c).border = bdr
+                    row += 1
+
             # "of net Receipt" note for e-books
             if any(d['is_ebook'] for d in rows_data):
                 ws.cell(row=row, column=7, value='of net Receipt').font = f(8)
                 row += 1
 
             # Total row
-            for c in range(1, 16):
+            for c in range(1, 17):
                 ws.cell(row=row, column=c).border = bdr
             ws.cell(row=row, column=8, value='TOTAL').font = f(9, bold=True)
             ws.cell(row=row, column=8).alignment = rgt
@@ -618,8 +646,8 @@ class ReportEngine:
             # Exchange rate note
             if ex_rate_used and ccy_used:
                 ccy_label = 'JPY' if ccy_used == 'JYP' else ccy_used
-                ws.cell(row=row, column=11,
-                        value=f'{ccy_label} = {ex_rate_used:.4f}').font = f(8)
+                ws.cell(row=row, column=6,
+                        value=f'*  at current exchange rate of {ccy_label} 1 per {ex_rate_used:.4f}  Baht').font = f(8)
             row += 2
 
         write_section('BI-ANNUAL 2025.1  (January – June 2025)',      bi1_rows, 'bi1')
@@ -628,7 +656,7 @@ class ReportEngine:
 
         # ── Column widths ─────────────────────────────────────────────────────
         for i, w in enumerate(
-            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10], 1
+            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10, 13], 1
         ):
             ws.column_dimensions[get_column_letter(i)].width = w
 
