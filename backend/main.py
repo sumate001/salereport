@@ -145,6 +145,16 @@ def generate_all(req: GenerateAllReq):
     return {"file_path": zip_path, "filename": os.path.basename(zip_path)}
 
 
+# ── GET /api/dashboard ───────────────────────────────────────────────────────
+
+@app.get("/api/dashboard")
+def get_dashboard(session_id: str = Query(...)):
+    try:
+        return _engine(session_id).get_dashboard_data()
+    except Exception as e:
+        raise HTTPException(500, f"Dashboard ล้มเหลว: {e}")
+
+
 # ── GET /api/download ─────────────────────────────────────────────────────────
 
 @app.get("/api/download")

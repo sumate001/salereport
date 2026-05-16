@@ -586,6 +586,148 @@ class ReportEngine:
                         zf.write(fpath, arcname)
         return zip_path
 
+    # ── Dashboard data ───────────────────────────────────────────────────────────
+
+    def get_dashboard_data(self):
+        self._ensure_rates()
+        self._init_intra_cols()
+        item = self.item
+
+        # ── ISBN-level aggregation ────────────────────────────────────────────
+        isbn_stats = {}
+        for _, row in item.iterrows():
+            isbn = safe_str(row.iloc[ItemCol.ISBN])
+            if not isbn:
+                continue
+            title = (strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_EN]))
+                     or strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_TH])))
+            agency = safe_str(row.iloc[ItemCol.AGENCY])
+            if not agency or len(agency) <= 3:
+                agency = 'Direct Publisher'
+
+            paidtype   = safe_str(row.iloc[ItemCol.ANNUAL_BI]).upper()
+            is_bi      = 'BI' in paidtype
+            if is_bi:
+                copies_sold = (safe_float(row.iloc[ItemCol.BI_H1_AMARIN])
+                             + safe_float(row.iloc[ItemCol.BI_H1_ABOOK])
+                             + safe_float(row.iloc[ItemCol.BI_H2_AMARIN])
+                             + safe_float(row.iloc[ItemCol.BI_H2_ABOOK]))
+            else:
+                copies_sold = safe_float(row.iloc[ItemCol.ANNUAL_SOLD])
+
+            copies_printed = safe_float(row.iloc[ItemCol.COPIES_PRINTED])
+            retail         = safe_float(row.iloc[ItemCol.PRICE])
+            rate           = normalize_rate(row.iloc[ItemCol.ROYALTY_RATE])
+            royalty_thb    = copies_sold * retail * rate
+            status_2024    = safe_str(row.iloc[ItemCol.STATUS_2024])
+            prev_balance   = safe_float(row.iloc[ItemCol.PREV_BALANCE])
+
+            if isbn not in isbn_stats:
+                isbn_stats[isbn] = {
+                    'title':          title,
+                    'agency':         agency,
+                    'copies_sold':    0.0,
+                    'copies_printed': 0.0,
+                    'royalty_thb':    0.0,
+                    'status_2024':    status_2024,
+                    'prev_balance':   prev_balance,
+                }
+            isbn_stats[isbn]['copies_sold']    += copies_sold
+            isbn_stats[isbn]['copies_printed'] += copies_printed
+            isbn_stats[isbn]['royalty_thb']    += royalty_thb
+
+        total_isbns   = len(isbn_stats)
+        with_sales    = sum(1 for v in isbn_stats.values() if v['copies_sold'] > 0)
+        zero_sales    = sum(1 for v in isbn_stats.values() if v['copies_sold'] == 0)
+        total_royalty = sum(v['royalty_thb'] for v in isbn_stats.values())
+
+        # ── Advance status (per unique ISBN) ──────────────────────────────────
+        advance_status = {'จ่ายแล้ว': 0, 'ค้างจ่าย': 0, 'ยังไม่เกิน ADV': 0}
+        seen = set()
+        for _, row in item.iterrows():
+            isbn = safe_str(row.iloc[ItemCol.ISBN])
+            if not isbn or isbn in seen:
+                continue
+            seen.add(isbn)
+            s = safe_str(row.iloc[ItemCol.STATUS_2024])
+            if s in advance_status:
+                advance_status[s] += 1
+
+        # ── Sell-off expiring (year = 2025) ───────────────────────────────────
+        expiring = set()
+        for _, row in self.intra.iterrows():
+            try:
+                sell_yr = extract_year(row.iloc[IntraCol.SELL_OFF])
+            except Exception:
+                continue
+            if sell_yr == 2025:
+                for isbn_col in self._intra_isbn_cols:
+                    v = safe_str(row.iloc[isbn_col])
+                    if v:
+                        expiring.add(v)
+                        break
+
+        # ── Agent aggregation ─────────────────────────────────────────────────
+        agent_agg = {}
+        for isbn, stats in isbn_stats.items():
+            ag = stats['agency']
+            if ag not in agent_agg:
+                agent_agg[ag] = {'printed': 0.0, 'sold': 0.0, 'isbns': set(), 'royalty': 0.0}
+            agent_agg[ag]['printed'] += stats['copies_printed']
+            agent_agg[ag]['sold']    += stats['copies_sold']
+            agent_agg[ag]['isbns'].add(isbn)
+            agent_agg[ag]['royalty'] += stats['royalty_thb']
+
+        agents = sorted([
+            {
+                'name':             ag,
+                'isbn_count':       len(v['isbns']),
+                'sell_through_pct': round(v['sold'] / v['printed'] * 100, 1) if v['printed'] > 0 else 0.0,
+                'royalty_thb':      round(v['royalty'], 0),
+            }
+            for ag, v in agent_agg.items()
+        ], key=lambda x: -x['royalty_thb'])
+
+        # ── Top books & zero-sales books ──────────────────────────────────────
+        all_books = sorted([
+            {
+                'isbn':             isbn,
+                'title':            v['title'],
+                'agency':           v['agency'],
+                'copies_sold':      int(v['copies_sold']),
+                'royalty_thb':      round(v['royalty_thb'], 0),
+                'sell_through_pct': round(v['copies_sold'] / v['copies_printed'] * 100, 1)
+                                    if v['copies_printed'] > 0 else 0.0,
+            }
+            for isbn, v in isbn_stats.items()
+        ], key=lambda x: -x['royalty_thb'])
+
+        top_books  = all_books[:10]
+        zero_books = [b for b in all_books if b['copies_sold'] == 0][:10]
+
+        # ── Totals ────────────────────────────────────────────────────────────
+        agency_series    = self._clean(item.iloc[:, ItemCol.AGENCY])
+        total_agencies   = len([a for a in agency_series.unique() if a and len(a) > 3])
+        pub_series       = self._clean(self.intra.iloc[:, IntraCol.PUBLISHER])
+        total_publishers = len([p for p in pub_series.unique()
+                                 if p and p.lower() not in ('nan', '')])
+
+        return {
+            'summary': {
+                'total_isbns':       total_isbns,
+                'total_agencies':    total_agencies,
+                'total_publishers':  total_publishers,
+                'with_sales':        with_sales,
+                'zero_sales':        zero_sales,
+                'expiring_2025':     len(expiring),
+                'total_royalty_thb': round(total_royalty, 0),
+            },
+            'advance_status': advance_status,
+            'agents':         agents,
+            'top_books':      top_books,
+            'zero_books':     zero_books,
+        }
+
     # ── Excel writer ──────────────────────────────────────────────────────────
 
     def _write_excel(self, path, country, agency, publisher, period,
