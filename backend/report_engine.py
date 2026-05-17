@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import tempfile
 import zipfile
 import pandas as pd
@@ -753,6 +754,9 @@ class ReportEngine:
         agency_series = self._clean(self.item.iloc[:, ItemCol.AGENCY])
         all_agencies  = sorted(agency_series.unique())
 
+        # Write xlsx to an isolated temp dir so old period files don't leak into this ZIP
+        xlsx_tmp = tempfile.mkdtemp()
+
         for agency_raw in all_agencies:
             agent_items = self.item[agency_series == agency_raw].copy()
             if agent_items.empty:
@@ -760,7 +764,7 @@ class ReportEngine:
 
             agency_label = agency_raw if len(agency_raw) > 3 else 'Direct Publisher'
             safe_agency  = re.sub(r'[\\/:*?"<>|]', '_', agency_label)
-            agency_dir   = os.path.join(output_dir, safe_agency)
+            agency_dir   = os.path.join(xlsx_tmp, safe_agency)
 
             isbn_series = self._clean(agent_items.iloc[:, ItemCol.ISBN])
             processed_contracts = set()
@@ -843,12 +847,13 @@ class ReportEngine:
 
         zip_path = os.path.join(output_dir, f'SalesReports_All_{period}.zip')
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for root, _dirs, files in os.walk(output_dir):
+            for root, _dirs, files in os.walk(xlsx_tmp):
                 for fname in files:
                     if fname.endswith('.xlsx'):
                         fpath   = os.path.join(root, fname)
-                        arcname = os.path.relpath(fpath, output_dir)
+                        arcname = os.path.relpath(fpath, xlsx_tmp)
                         zf.write(fpath, arcname)
+        shutil.rmtree(xlsx_tmp, ignore_errors=True)
         return zip_path
 
     # ── Dashboard data ───────────────────────────────────────────────────────────
