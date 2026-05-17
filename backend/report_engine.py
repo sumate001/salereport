@@ -34,6 +34,9 @@ class ItemCol:
     PREV_BALANCE     = 72
     STATUS_2024      = 73
     STOCK_ACCOUNT    = 79
+    EB_NET_BI1       = 75   # ยอดจ่าย 2025.1  (e-book H1 net receipt)
+    EB_NET_BI2       = 78   # ยอดจ่าย 2025.2  (e-book H2 net receipt)
+    EB_NET_ANNUAL    = 81   # ยอดจ่าย 2025    (e-book annual net receipt)
 
 
 class IntraCol:
@@ -384,6 +387,17 @@ class ReportEngine:
             if not fallback_rate and tiers:
                 fallback_rate = tiers[0][2]
 
+            # E-book net receipt (stored as negative; abs = royalty amount in payment currency)
+            if is_ebook:
+                if period == 'bi1':
+                    eb_net = abs(safe_float(first_r.iloc[ItemCol.EB_NET_BI1]))
+                elif period == 'bi2':
+                    eb_net = abs(safe_float(first_r.iloc[ItemCol.EB_NET_BI2]))
+                else:
+                    eb_net = abs(safe_float(first_r.iloc[ItemCol.EB_NET_ANNUAL]))
+            else:
+                eb_net = 0.0
+
             # Clean titles (strip reprint suffix) — for display header
             title_th_raw  = safe_str(first_r.iloc[ItemCol.TITLE_TH])
             title_en_raw  = safe_str(first_r.iloc[ItemCol.TITLE_EN])
@@ -443,7 +457,9 @@ class ReportEngine:
             # PERIOD BALANCE (first tier row only, when advance exists)
             period_balance = None
             if prev_balance > 0:
-                if tier_split:
+                if is_ebook:
+                    amt_thb_total = eb_net
+                elif tier_split:
                     amt_thb_total = sum(tc * retail * tr for tc, tr in tier_split)
                 else:
                     amt_thb_total = total_copies_sold * retail * fallback_rate
@@ -564,20 +580,20 @@ class ReportEngine:
             has_inline_calc = multiple_runs and any_prt_row
 
             def make_tier_row(tc, tr, is_first_tier):
-                amt_thb = tc * retail * tr
+                amt_thb = eb_net if is_ebook else tc * retail * tr
                 return {
                     'row_type':       'tier',
                     'job':            '' if multiple_runs else (job_first if is_first_tier else ''),
-                    'isbn':           None if multiple_runs else (isbn if is_first_tier else None),
+                    'isbn':           None if (multiple_runs or is_ebook) else (isbn if is_first_tier else None),
                     'title':          '' if multiple_runs else (title_display if is_first_tier else ''),
                     'title_th':       '' if multiple_runs else (title_th_sub  if is_first_tier else ''),
-                    'copies_printed': None if multiple_runs else (total_copies_printed if is_first_tier else None),
+                    'copies_printed': None if (multiple_runs or is_ebook) else (total_copies_printed if is_first_tier else None),
                     'date_printed':   (
                         '' if multiple_runs else
                         (format_date_printed(first_r.iloc[ItemCol.DATE_PRINTED]) if is_first_tier else '')
                     ),
-                    'copies_sold':    tc,
-                    'retail_price':   retail,
+                    'copies_sold':    None if is_ebook else tc,
+                    'retail_price':   None if is_ebook else retail,
                     'royalty_rate':   tr,
                     'amount_thb':     amt_thb,
                     'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
@@ -1138,12 +1154,8 @@ class ReportEngine:
                     ex_rate_used = d['ex_rate']
                     ccy_used     = d['currency']
                 else:
-                    if d['is_ebook']:
-                        put(1, '',                align=lft)
-                        put(2, d['isbn'] or None, align=lft)
-                    else:
-                        put(1, d['job'],          align=lft)
-                        put(2, d['isbn'] or None, align=lft)
+                    put(1, d['job'],          align=lft)
+                    put(2, d['isbn'] or None, align=lft)
                     put(3,  d['title'],                        align=lft)
                     put(4,  d['copies_printed'] or None,       NUM)
                     put(5,  d['date_printed'],                 align=lft)
