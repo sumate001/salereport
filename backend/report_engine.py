@@ -84,20 +84,20 @@ def normalize_rate(rate):
 
 
 def format_date_printed(val):
-    """แปลง date เป็น '21 May 2024' format"""
+    """แปลง date เป็น 'Mar-14' format (Mon-YY) ตามตัวอย่าง"""
     if val is None:
         return ''
     if isinstance(val, datetime):
-        return val.strftime('%d %b %Y')
+        return val.strftime('%b-%y')
     if hasattr(val, 'strftime'):
-        return val.strftime('%d %b %Y')
+        return val.strftime('%b-%y')
     s = safe_str(val)
     if not s:
         return ''
     try:
         dt = pd.to_datetime(s)
         if pd.notna(dt):
-            return dt.strftime('%d %b %Y')
+            return dt.strftime('%b-%y')
     except Exception:
         pass
     return s
@@ -125,10 +125,16 @@ def report_year_from_period(period: str) -> int:
     return 2025
 
 def strip_reprint_suffix(title: str) -> str:
-    """Strip reprint indicators like (พ.1), (พ.2), พิมพ์เพิ่ม from title."""
+    """Strip reprint/edition indicators and English-annotation suffixes from title."""
     s = re.sub(r'\s*[\(（][พP]\.\s*\d+[\)）]', '', title)
     s = re.sub(r'\s*พิมพ์เพิ่ม.*', '', s)
     s = re.sub(r'\s*พิมพ์ครั้งที่\s*\d+.*', '', s)
+    # Strip parenthesized blocks that start with a Latin letter (English annotations)
+    s = re.sub(r'\s*\([A-Za-z][^)]*\)', '', s)
+    # Strip trailing ASCII-only production notes (e.g. "D-Print") only when the title
+    # contains Thai characters (so we don't truncate English-only titles like "A Dance with Dragons")
+    if re.search(r'[฀-๿]', s):
+        s = re.sub(r'\s+[A-Za-z][A-Za-z0-9\-]*$', '', s)
     return s.strip()
 
 
@@ -157,8 +163,10 @@ def parse_rt_tiers(intra_row):
             break
         if not rt_text or rt_price == 0:
             continue
-        m_range = re.match(r'a(\d+)-(\d+)', rt_text, re.IGNORECASE)
-        m_from  = re.match(r'a(\d+)$',      rt_text, re.IGNORECASE)
+        # strip commas from numbers (e.g. "a1-20,000" → "a1-20000"), allow trailing text
+        rt_clean = re.sub(r'(?<=\d),(?=\d)', '', rt_text)
+        m_range = re.match(r'a(\d+)-(\d+)', rt_clean, re.IGNORECASE)
+        m_from  = re.match(r'a(\d+)',        rt_clean, re.IGNORECASE)
         if m_range:
             tiers.append((int(m_range.group(1)), int(m_range.group(2)), normalize_rate(rt_price)))
         elif m_from:
@@ -265,8 +273,9 @@ class ReportEngine:
         if self._intra_cols_init:
             return
         self._intra_cols_init = True
+        n_sample = min(200, self.intra.shape[0])
         for c in range(self.intra.shape[1]):
-            sample = self._clean(self.intra.iloc[:10, c]).tolist()
+            sample = self._clean(self.intra.iloc[:n_sample, c]).tolist()
             if any(re.match(r'\d{2}/[A-Z]', s) or s.startswith('EB/') for s in sample):
                 self._intra_job_col = c
             if any(re.match(r'978\d{10}', s) for s in sample):
@@ -279,16 +288,26 @@ class ReportEngine:
         job  = safe_str(item_row.iloc[ItemCol.JOB])
         df   = self.intra
 
+        def _best(matched_df):
+            """Return row with rt rate data if available, else first row."""
+            for _, row in matched_df.iterrows():
+                try:
+                    if safe_float(row.iloc[IntraCol.RT1_PRICE]) > 0:
+                        return row
+                except Exception:
+                    pass
+            return matched_df.iloc[0]
+
         if self._intra_job_col >= 0 and job:
             mask = self._clean(df.iloc[:, self._intra_job_col]) == job
             if mask.any():
-                return df[mask].iloc[0]
+                return _best(df[mask])
 
         if isbn:
             for isbn_col in self._intra_isbn_cols:
                 mask = self._clean(df.iloc[:, isbn_col]).str.startswith(isbn)
                 if mask.any():
-                    return df[mask].iloc[0]
+                    return _best(df[mask])
 
         return None
 
@@ -296,17 +315,33 @@ class ReportEngine:
         report_yr  = report_year_from_period(period)
         job        = safe_str(item_row.iloc[ItemCol.JOB])
         is_ebook   = job.upper().startswith('EB/')
-        intra_row  = self._find_intra_row(item_row)
+        self._init_intra_cols()
+        isbn = safe_str(item_row.iloc[ItemCol.ISBN])
+        df   = self.intra
+        col  = IntraCol.EXP_DATE if is_ebook else IntraCol.SELL_OFF
 
-        if intra_row is None:
-            return True
+        # Collect all matching intra rows (by job or ISBN) to get the most permissive date.
+        # A single contract can have multiple sub-rows; if ANY row allows the book (sell_off
+        # is None or >= report_year), include it.
+        def _any_pass(matched_df):
+            for _, row in matched_df.iterrows():
+                sell_yr = extract_year(row.iloc[col])
+                if sell_yr is None or sell_yr >= report_yr:
+                    return True
+            return False
 
-        col      = IntraCol.EXP_DATE if is_ebook else IntraCol.SELL_OFF
-        sell_yr  = extract_year(intra_row.iloc[col])
+        if self._intra_job_col >= 0 and job:
+            mask = self._clean(df.iloc[:, self._intra_job_col]) == job
+            if mask.any():
+                return _any_pass(df[mask])
 
-        if sell_yr is None:
-            return True
-        return sell_yr >= report_yr
+        if isbn:
+            for isbn_col in self._intra_isbn_cols:
+                mask = self._clean(df.iloc[:, isbn_col]).str.startswith(isbn)
+                if mask.any():
+                    return _any_pass(df[mask])
+
+        return True
 
     # ── Row builder ───────────────────────────────────────────────────────────
 
@@ -345,6 +380,9 @@ class ReportEngine:
             ex_rate       = self.get_rate(currency, period)
             intra_row     = self._find_intra_row(first_r)
             tiers         = parse_rt_tiers(intra_row)
+            # If item file has no rate but intra tiers do, use first tier rate as fallback
+            if not fallback_rate and tiers:
+                fallback_rate = tiers[0][2]
 
             # Clean titles (strip reprint suffix) — for display header
             title_th_raw  = safe_str(first_r.iloc[ItemCol.TITLE_TH])
@@ -369,7 +407,38 @@ class ReportEngine:
                 total_copies_sold    += run_sold
                 total_copies_printed += safe_float(r.iloc[ItemCol.COPIES_PRINTED])
 
-            tier_split = apply_rt_tiers(total_copies_sold, tiers)
+            # Tier split: determined by each run's position in the cumulative
+            # print sequence.  A run occupying [cumul+1 … cumul+printed] may
+            # straddle multiple tier brackets; its sold copies are split
+            # proportionally.  run_portions[i] = [(p_printed, tier_idx, rate), …]
+            if tiers:
+                cumul_printed = 0.0
+                tier_buckets  = [0.0] * len(tiers)
+                run_portions  = []
+                for _r, run_sold in run_data:
+                    rp        = safe_float(_r.iloc[ItemCol.COPIES_PRINTED])
+                    run_start = cumul_printed + 1.0
+                    run_end   = cumul_printed + max(rp, 0.0)
+                    cumul_printed = run_end
+                    portions = []
+                    if rp > 0.0:
+                        for i, (min_c, max_c, t_rate) in enumerate(tiers):
+                            ov_s = max(run_start, float(min_c))
+                            ov_e = min(run_end,   float(max_c))
+                            if ov_e >= ov_s:
+                                p = ov_e - ov_s + 1.0
+                                portions.append((p, i, t_rate))
+                                if run_sold > 0.0:
+                                    tier_buckets[i] += run_sold * (p / rp)
+                    run_portions.append(portions)
+                tier_split = [
+                    (bucket, tiers[i][2])
+                    for i, bucket in enumerate(tier_buckets)
+                    if bucket > 0.0
+                ]
+            else:
+                run_portions = [[] for _ in run_data]
+                tier_split   = []
 
             # PERIOD BALANCE (first tier row only, when advance exists)
             period_balance = None
@@ -395,37 +464,104 @@ class ReportEngine:
             multiple_runs = len(group) > 1
 
             # ── Print run sub-rows (only when >1 reprint) ──────────────────────
+            # Rules:
+            #  • Run in a single tier with 0 sold  → print_run row (with retail/rate, advance on first)
+            #  • Run in a single tier with sold > 0 → one print_run_tier row (with calc)
+            #  • Run straddling ≥2 tiers            → one print_run_tier row per portion
+            # Advance / balance always go to the very first row (first run, first tier).
             if multiple_runs:
-                for i, (r, run_sold) in enumerate(run_data):
-                    is_first = (i == 0)
-                    run_title = safe_str(r.iloc[ItemCol.TITLE_EN]) or safe_str(r.iloc[ItemCol.TITLE_TH])
-                    rows.append({
-                        'row_type':       'print_run',
-                        'job':            safe_str(r.iloc[ItemCol.JOB]) if is_first else '',
-                        'isbn':           isbn if is_first else None,
-                        'title':          title_display if is_first else run_title,
-                        'title_th':       title_th_sub  if is_first else '',
-                        'copies_printed': safe_float(r.iloc[ItemCol.COPIES_PRINTED]),
-                        'date_printed':   format_date_printed(r.iloc[ItemCol.DATE_PRINTED]),
-                        'copies_sold':    run_sold,
-                        'retail_price':   None,
-                        'royalty_rate':   None,
-                        'amount_thb':     0.0,
-                        'amount_ccy':     0.0,
-                        'currency':       currency,
-                        'adv':            None,
-                        'adv_currency':   adv_cur,
-                        'prev_balance':   None,
-                        'balance_paid':   None,
-                        'period_balance': None,
-                        'unsold_copies':  None,
-                        'stock_account':  None,
-                        'is_ebook':       is_ebook,
-                        'ex_rate':        ex_rate,
-                    })
+                any_prt_row   = False   # any print_run_tier row created
+                adv_placed    = False   # advance/balance already written
 
-            # ── Tier rows (based on total copies_sold across all reprints) ──────
-            job_first = safe_str(first_r.iloc[ItemCol.JOB])
+                for idx, (r, run_sold) in enumerate(run_data):
+                    is_first_run = (idx == 0)
+                    run_title    = safe_str(r.iloc[ItemCol.TITLE_EN]) or safe_str(r.iloc[ItemCol.TITLE_TH])
+                    date_str     = format_date_printed(r.iloc[ItemCol.DATE_PRINTED])
+                    run_printed  = safe_float(r.iloc[ItemCol.COPIES_PRINTED])
+                    portions     = run_portions[idx]   # [(p_printed, tier_idx, rate), …]
+
+                    # Title column rule (per-run index within each ISBN group):
+                    #   run 0 → EN title (from contract/intra), run 1 → TH title
+                    #   (use this run's own TITLE_TH for accuracy), run 2+ → blank
+                    if idx == 0:
+                        run_title_col = title_display
+                    elif idx == 1:
+                        run_title_col = (strip_reprint_suffix(safe_str(r.iloc[ItemCol.TITLE_TH]))
+                                         or title_th_sub)
+                    else:
+                        run_title_col = ''
+
+                    # Single-tier zero-sold → context row with retail/rate; advance on first run
+                    if not portions or (len(portions) == 1 and run_sold == 0.0):
+                        want_adv = is_first_run and not adv_placed
+                        if want_adv:
+                            adv_placed = True
+                        rows.append({
+                            'row_type':       'print_run',
+                            'job':            safe_str(r.iloc[ItemCol.JOB]),  # every row
+                            'isbn':           isbn,                            # every row
+                            'title':          run_title_col,
+                            'title_th':       '',  # no separate TH row; embedded in run 1
+                            'copies_printed': run_printed,
+                            'date_printed':   date_str,
+                            'copies_sold':    run_sold,
+                            'retail_price':   retail or None,
+                            'royalty_rate':   (portions[0][2] if portions else fallback_rate) or None,
+                            'amount_thb':     0.0,
+                            'amount_ccy':     0.0,
+                            'currency':       currency,
+                            'adv':            adv           if want_adv else None,
+                            'adv_currency':   adv_cur,
+                            'prev_balance':   prev_balance  if want_adv else None,
+                            'balance_paid':   balance_paid  if want_adv else None,
+                            'period_balance': period_balance if want_adv else None,
+                            'unsold_copies':  unsold_copies  if want_adv else None,
+                            'stock_account':  stock_account  if want_adv else None,
+                            'is_ebook':       is_ebook,
+                            'ex_rate':        ex_rate,
+                        })
+                        continue
+
+                    # Straddling or has sold: one print_run_tier row per tier portion
+                    any_prt_row = True
+                    for p_idx, (p_printed, _t_idx, t_rate) in enumerate(portions):
+                        p_sold  = run_sold * (p_printed / run_printed) if run_printed > 0.0 else 0.0
+                        amt_thb = p_sold * retail * t_rate
+
+                        # Advance always on first row (first run, first portion)
+                        want_adv = (not adv_placed) and (p_idx == 0) and is_first_run
+                        if want_adv:
+                            adv_placed = True
+
+                        rows.append({
+                            'row_type':       'print_run_tier',
+                            'job':            safe_str(r.iloc[ItemCol.JOB]) if p_idx == 0 else '',
+                            'isbn':           isbn if p_idx == 0 else None,
+                            'title':          run_title_col if p_idx == 0 else '',
+                            'title_th':       '',  # no separate TH row; embedded in run 1
+                            'copies_printed': p_printed,
+                            'date_printed':   date_str,
+                            'retail_price':   retail,
+                            'royalty_rate':   t_rate,
+                            'copies_sold':    p_sold,
+                            'amount_thb':     amt_thb,
+                            'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
+                            'currency':       currency,
+                            'adv':            adv           if want_adv else 0.0,
+                            'adv_currency':   adv_cur,
+                            'prev_balance':   prev_balance  if want_adv else 0.0,
+                            'balance_paid':   balance_paid  if want_adv else 0.0,
+                            'period_balance': period_balance if want_adv else None,
+                            'unsold_copies':  unsold_copies  if want_adv else None,
+                            'stock_account':  stock_account  if want_adv else None,
+                            'is_ebook':       is_ebook,
+                            'ex_rate':        ex_rate,
+                        })
+
+            # ── Tier rows ────────────────────────────────────────────────────────
+            # Skip when print_run_tier rows already carry all calculation amounts.
+            job_first       = safe_str(first_r.iloc[ItemCol.JOB])
+            has_inline_calc = multiple_runs and any_prt_row
 
             def make_tier_row(tc, tr, is_first_tier):
                 amt_thb = tc * retail * tr
@@ -457,11 +593,19 @@ class ReportEngine:
                     'ex_rate':        ex_rate,
                 }
 
-            if tier_split:
-                for j, (tc, tr) in enumerate(tier_split):
-                    rows.append(make_tier_row(tc, tr, is_first_tier=(j == 0)))
-            else:
-                rows.append(make_tier_row(total_copies_sold, fallback_rate, is_first_tier=True))
+            if not has_inline_calc:
+                if tier_split:
+                    for j, (tc, tr) in enumerate(tier_split):
+                        rows.append(make_tier_row(tc, tr, is_first_tier=(j == 0)))
+                else:
+                    rows.append(make_tier_row(total_copies_sold, fallback_rate, is_first_tier=True))
+
+            # Blank separator row between ISBN groups (matches sample layout)
+            rows.append({'row_type': 'blank'})
+
+        # Remove trailing blank row
+        while rows and rows[-1].get('row_type') == 'blank':
+            rows.pop()
 
         return rows
 
@@ -491,7 +635,7 @@ class ReportEngine:
         filename   = f"SalesReport_{safe_agent}_{period}.xlsx"
         out_path   = os.path.join(output_dir, filename)
 
-        self._write_excel(out_path, country, agency, publisher, period,
+        self._write_excel(out_path, country, agency, publisher, None, None, period,
                           bi1_rows, bi2_rows, an_rows)
         return out_path
 
@@ -511,29 +655,85 @@ class ReportEngine:
         return zip_path
 
     def _get_info_for_isbn(self, isbn: str):
-        """Return (country, publisher) for an ISBN from the intra sheet."""
+        """Return (country, publisher, intermediate_agent, contract_expiry) for an ISBN."""
         self._init_intra_cols()
         if not isbn:
-            return ('', '')
+            return ('', '', '', None)
         for isbn_col in self._intra_isbn_cols:
             mask = self._clean(self.intra.iloc[:, isbn_col]).str.startswith(isbn)
             matched = self.intra[mask]
             if not matched.empty:
-                row = matched.iloc[0]
+                r = matched.iloc[0]
+                sell_off = r.iloc[IntraCol.SELL_OFF]
+                exp_date = r.iloc[IntraCol.EXP_DATE]
+                def _is_valid_date(v):
+                    if v is None:
+                        return False
+                    s = safe_str(v).strip().lower()
+                    return s and s not in ('nan', 'nat', '')
+                contract_expiry = sell_off if _is_valid_date(sell_off) else (exp_date if _is_valid_date(exp_date) else None)
                 return (
-                    safe_str(row.iloc[IntraCol.COUNTRY]),
-                    safe_str(row.iloc[IntraCol.PUBLISHER]),
+                    safe_str(r.iloc[IntraCol.COUNTRY]),
+                    safe_str(r.iloc[IntraCol.PUBLISHER]),
+                    safe_str(r.iloc[IntraCol.AGENT]),
+                    contract_expiry,
                 )
-        return ('', '')
+        return ('', '', '', None)
 
     def generate_all(self, period='annual', output_dir=None):
-        """Generate one Excel per ISBN inside Agent/Publisher folders, bundled as ZIP."""
+        """Generate one Excel per intra contract (may cover multiple ISBNs), bundled as ZIP."""
         if output_dir is None:
             output_dir = tempfile.mkdtemp()
 
         self._ensure_rates()
+        self._init_intra_cols()
 
-        # Iterate all unique agency values, including blank → Direct Publisher
+        # ── Build contract map: intra row → list of ISBNs ────────────────────
+        def _is_valid_date(v):
+            s = safe_str(v).strip().lower()
+            return s and s not in ('nan', 'nat', '')
+
+        contracts = []          # list of dicts per intra row
+        isbn_to_contract = {}   # isbn → index into contracts
+
+        for _, intra_row in self.intra.iterrows():
+            isbns = []
+            for isbn_col in self._intra_isbn_cols:
+                val = safe_str(intra_row.iloc[isbn_col]).strip()
+                m = re.match(r'(978\d{10})', val)
+                if m:
+                    isbn_val = m.group(1)
+                    if isbn_val not in isbns:
+                        isbns.append(isbn_val)
+            if not isbns:
+                continue
+            sell_off = intra_row.iloc[IntraCol.SELL_OFF]
+            exp_date = intra_row.iloc[IntraCol.EXP_DATE]
+            contract_expiry = sell_off if _is_valid_date(sell_off) else (exp_date if _is_valid_date(exp_date) else None)
+            idx = len(contracts)
+            contracts.append({
+                'isbns':              isbns,
+                'country':            safe_str(intra_row.iloc[IntraCol.COUNTRY]),
+                'publisher':          safe_str(intra_row.iloc[IntraCol.PUBLISHER]),
+                'intermediate_agent': safe_str(intra_row.iloc[IntraCol.AGENT]),
+                'contract_expiry':    contract_expiry,
+            })
+            agent_val = safe_str(intra_row.iloc[IntraCol.AGENT])
+            pub_val   = safe_str(intra_row.iloc[IntraCol.PUBLISHER])
+            for isbn in isbns:
+                if isbn not in isbn_to_contract:
+                    isbn_to_contract[isbn] = idx
+                else:
+                    # ถ้า contract เดิม agent ว่าง แต่ row นี้มี agent → อัปเดต
+                    existing_idx = isbn_to_contract[isbn]
+                    if not contracts[existing_idx]['intermediate_agent'] and agent_val:
+                        contracts[existing_idx]['intermediate_agent'] = agent_val
+                        if pub_val:
+                            contracts[existing_idx]['publisher'] = pub_val
+                        if not contracts[existing_idx]['country']:
+                            contracts[existing_idx]['country'] = safe_str(intra_row.iloc[IntraCol.COUNTRY])
+
+        # ── Iterate item file by agency ───────────────────────────────────────
         agency_series = self._clean(self.item.iloc[:, ItemCol.AGENCY])
         all_agencies  = sorted(agency_series.unique())
 
@@ -547,11 +747,60 @@ class ReportEngine:
             agency_dir   = os.path.join(output_dir, safe_agency)
 
             isbn_series = self._clean(agent_items.iloc[:, ItemCol.ISBN])
+            processed_contracts = set()
+            orphan_isbns = []
+
             for isbn in sorted(isbn_series.unique()):
-                if not isbn:
+                if not isbn or not re.match(r'978\d{10}', isbn):
                     continue
+                contract_idx = isbn_to_contract.get(isbn)
+                if contract_idx is None:
+                    orphan_isbns.append(isbn)
+                    continue
+                if contract_idx in processed_contracts:
+                    continue
+                processed_contracts.add(contract_idx)
+
+                c = contracts[contract_idx]
+                all_isbns  = c['isbns']
+                # Collect item rows for ALL ISBNs in this contract (current agency)
+                contract_items = agent_items[isbn_series.isin(all_isbns)].copy()
+
+                safe_pub = re.sub(r'[\\/:*?"<>|]', '_', c['publisher'] or 'Unknown Publisher')
+                pub_dir  = os.path.join(agency_dir, safe_pub)
+                os.makedirs(pub_dir, exist_ok=True)
+
+                type_col = self._clean(contract_items.iloc[:, ItemCol.ANNUAL_BI])
+                bi_mask  = type_col.str.upper().str.contains('BI')
+
+                bi1_rows = self._build_rows(contract_items[bi_mask],  'bi1')    if period in ('all', 'bi1')    else []
+                bi2_rows = self._build_rows(contract_items[bi_mask],  'bi2')    if period in ('all', 'bi2')    else []
+                an_rows  = self._build_rows(contract_items[~bi_mask], 'annual') if period in ('all', 'annual') else []
+
+                if not any([bi1_rows, bi2_rows, an_rows]):
+                    continue
+
+                # File name: use title of first matching ISBN, strip volume/reprint suffix
+                primary_items = contract_items[isbn_series.isin([all_isbns[0]])]
+                if primary_items.empty:
+                    primary_items = contract_items.iloc[:1]
+                raw_title   = safe_str(primary_items.iloc[0, ItemCol.TITLE_TH])
+                clean_title = strip_reprint_suffix(raw_title)
+                # Strip volume numbers like " 5.1", " 5.2" anywhere in the title
+                clean_title = re.sub(r'\s+\d+\.\d+', '', clean_title).strip()
+                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{all_isbns[0]} - {clean_title}")
+
+                self._write_excel(
+                    os.path.join(pub_dir, f"{safe_name}.xlsx"),
+                    c['country'], agency_label, c['publisher'],
+                    c['intermediate_agent'], c['contract_expiry'], period,
+                    bi1_rows, bi2_rows, an_rows,
+                )
+
+            # Orphaned ISBNs (not in any intra contract)
+            for isbn in orphan_isbns:
                 isbn_items = agent_items[isbn_series == isbn].copy()
-                country, publisher = self._get_info_for_isbn(isbn)
+                country, publisher, intermediate_agent, contract_expiry = self._get_info_for_isbn(isbn)
 
                 safe_pub = re.sub(r'[\\/:*?"<>|]', '_', publisher or 'Unknown Publisher')
                 pub_dir  = os.path.join(agency_dir, safe_pub)
@@ -572,7 +821,7 @@ class ReportEngine:
                 safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{isbn} - {clean_title}")
                 self._write_excel(
                     os.path.join(pub_dir, f"{safe_name}.xlsx"),
-                    country, agency_label, publisher, period,
+                    country, agency_label, publisher, intermediate_agent, contract_expiry, period,
                     bi1_rows, bi2_rows, an_rows,
                 )
 
@@ -597,7 +846,7 @@ class ReportEngine:
         isbn_stats = {}
         for _, row in item.iterrows():
             isbn = safe_str(row.iloc[ItemCol.ISBN])
-            if not isbn:
+            if not isbn or not any(c.isdigit() for c in isbn):
                 continue
             title = (strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_EN]))
                      or strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_TH])))
@@ -698,6 +947,7 @@ class ReportEngine:
                 'royalty_thb':      round(v['royalty_thb'], 0),
                 'sell_through_pct': round(v['copies_sold'] / v['copies_printed'] * 100, 1)
                                     if v['copies_printed'] > 0 else 0.0,
+                'status':           v['status_2024'],
             }
             for isbn, v in isbn_stats.items()
         ], key=lambda x: -x['royalty_thb'])
@@ -722,15 +972,16 @@ class ReportEngine:
                 'expiring_2025':     len(expiring),
                 'total_royalty_thb': round(total_royalty, 0),
             },
-            'advance_status': advance_status,
-            'agents':         agents,
-            'top_books':      top_books,
-            'zero_books':     zero_books,
+            'advance_status':  advance_status,
+            'agents':          agents,
+            'top_books':       top_books,
+            'zero_books':      zero_books,
+            'all_books':       all_books,
         }
 
     # ── Excel writer ──────────────────────────────────────────────────────────
 
-    def _write_excel(self, path, country, agency, publisher, period,
+    def _write_excel(self, path, country, agency, publisher, intermediate_agent, contract_expiry, period,
                      bi1_rows, bi2_rows, an_rows):
         wb = Workbook()
         ws = wb.active
@@ -752,9 +1003,9 @@ class ReportEngine:
         SEC_FILL = PatternFill('solid', fgColor='D6E4F0')
 
         type_mark = {
-            'bi1': 'x  BI-ANNUAL             ANNUAL',
-            'bi2': 'x  BI-ANNUAL             ANNUAL',
-        }.get(period, '   BI-ANNUAL           x  ANNUAL')
+            'bi1': '   ANNUAL               x  BI-ANNUAL',
+            'bi2': '   ANNUAL               x  BI-ANNUAL',
+        }.get(period, 'x  ANNUAL               BI-ANNUAL')
 
         period_end = {
             'bi1':    'For the Period Ended June 30, 2025',
@@ -764,9 +1015,29 @@ class ReportEngine:
         }.get(period, 'For the Period Ended December 31, 2025')
 
         # ── Rows 1-6: header block ────────────────────────────────────────────
+        # Row 3: agency (the intermediate agent sending the report — e.g. Silkroad)
+        # Row 4: licensor line — "SubAgent/Publisher" or just "Publisher" when
+        #        intermediate_agent duplicates the agency (Silkroad is its own intra agent).
+        def _effective_intermediate(ia, ag):
+            if not ia:
+                return ''
+            # Normalise: strip trailing dots/commas, lowercase compare
+            ia_clean = ia.rstrip('.,; ').lower()
+            ag_clean = ag.rstrip('.,; ').lower()
+            if ia_clean in ag_clean or ag_clean in ia_clean:
+                return ''  # same entity — don't repeat
+            return ia
+
+        eff_ia = _effective_intermediate(intermediate_agent or '', agency)
+        if eff_ia and publisher:
+            licensor_line = f"{eff_ia}/{publisher}"
+        else:
+            licensor_line = eff_ia or publisher or ''
+
         row = 1
-        for txt in ['SALES REPORT', publisher, agency,
-                    publisher, type_mark, period_end]:
+        for txt in ['SALES REPORT', 'Amarin Corporations PCL',
+                    agency, licensor_line,
+                    type_mark, period_end]:
             ws.cell(row=row, column=3, value=txt).font = f(10, bold=(row <= 2))
             row += 1
 
@@ -777,11 +1048,11 @@ class ReportEngine:
 
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
-             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'STOCK'],
+             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF'],
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
-             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', '(เล่ม)'],
+             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ', 'Stock (เล่ม)'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
-             '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES', 'คงเหลือ Account'],
+             '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES', 'Account', 'คงเหลือ Account'],
         ]
         for hdr in hdr_rows:
             for c_idx, val in enumerate(hdr, 1):
@@ -800,8 +1071,8 @@ class ReportEngine:
             ws.cell(row=row, column=1, value=label).font = f(9, bold=True)
             ws.cell(row=row, column=1).fill = SEC_FILL
             ws.cell(row=row, column=1).alignment = lft
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=16)
-            for c in range(1, 17):
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=17)
+            for c in range(1, 18):
                 ws.cell(row=row, column=c).border = bdr
             row += 1
 
@@ -817,16 +1088,55 @@ class ReportEngine:
                     if fmt:
                         cell.number_format = fmt
 
+                if d['row_type'] == 'blank':
+                    row += 1
+                    continue
+
                 if d['row_type'] == 'print_run':
                     put(1, d['job'],                    align=lft)
                     put(2, d['isbn'] or None,           align=lft)
                     put(3, d['title'],                  align=lft)
                     put(4, d['copies_printed'] or None, NUM)
                     put(5, d['date_printed'],           align=lft)
-                    put(6,  None); put(7,  None)
+                    put(6, d['retail_price'] or None,   NUM)
+                    put(7, d['royalty_rate'] or None,   PCT)
                     put(8, d['copies_sold'] or None,    NUM)
-                    for c in range(9, 17):
-                        put(c, None)
+                    put(9,  0.0 if (d['retail_price'] and not d['is_ebook']) else None, NUM)
+                    put(10, None)
+                    put(11, d['adv']          if d['adv'] is not None else None, NUM)
+                    put(12, d['prev_balance'] if d['prev_balance'] is not None else None, NUM)
+                    put(13, d['balance_paid'] if d['balance_paid'] is not None else None, NUM)
+                    put(14, d['period_balance'], NUM)
+                    put(15, d['unsold_copies'], NUM)
+                    put(16, d['stock_account'] if d['stock_account'] is not None else None, NUM)
+                    _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
+                    put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
+                    ex_rate_used = d['ex_rate']
+                    ccy_used     = d['currency']
+                elif d['row_type'] == 'print_run_tier':
+                    # Hybrid row: shows print context (cols 1-5) + full calculation
+                    put(1, d['job'],          align=lft)
+                    put(2, d['isbn'] or None, align=lft)
+                    put(3, d['title'],        align=lft)
+                    put(4, d['copies_printed'] or None,  NUM)
+                    put(5, d['date_printed'],             align=lft)
+                    put(6, d['retail_price']  or None,   NUM)
+                    put(7, d['royalty_rate']  or None,   PCT)
+                    put(8, d['copies_sold']   or None,   NUM)
+                    put(9, d['amount_thb']    or None,   NUM)
+                    put(10, d['amount_ccy']   or None,   NUM)
+                    put(11, d['adv']          or None,   NUM)
+                    put(12, d['prev_balance'] or None,   NUM)
+                    put(13, d['balance_paid'] or None,   NUM)
+                    put(14, d['period_balance'],          NUM)
+                    put(15, d['unsold_copies'],           NUM)
+                    put(16, d['stock_account'] or None,  NUM)
+                    _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
+                    put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
+                    total_thb   += d['amount_thb']
+                    total_ccy   += d['amount_ccy']
+                    ex_rate_used = d['ex_rate']
+                    ccy_used     = d['currency']
                 else:
                     if d['is_ebook']:
                         put(1, '',                align=lft)
@@ -848,6 +1158,8 @@ class ReportEngine:
                     put(14, d['period_balance'],               NUM)
                     put(15, d['unsold_copies'],                NUM)
                     put(16, d['stock_account']  or None,       NUM)
+                    _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
+                    put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
 
                     total_thb   += d['amount_thb']
                     total_ccy   += d['amount_ccy']
@@ -858,18 +1170,18 @@ class ReportEngine:
 
                 if d.get('title_th'):
                     put(3, d['title_th'], align=lft)
-                    for c in range(1, 17):
+                    for c in range(1, 18):
                         if c != 3:
                             ws.cell(row=row, column=c).border = bdr
                     row += 1
 
             # "of net Receipt" note for e-books
-            if any(d['is_ebook'] for d in rows_data):
+            if any(d.get('is_ebook') for d in rows_data):
                 ws.cell(row=row, column=7, value='of net Receipt').font = f(8)
                 row += 1
 
             # Total row
-            for c in range(1, 17):
+            for c in range(1, 18):
                 ws.cell(row=row, column=c).border = bdr
             ws.cell(row=row, column=8, value='TOTAL').font = f(9, bold=True)
             ws.cell(row=row, column=8).alignment = rgt
@@ -882,10 +1194,26 @@ class ReportEngine:
 
             # Exchange rate note
             if ex_rate_used and ccy_used:
-                ccy_label = 'JPY' if ccy_used == 'JYP' else ccy_used
+                ccy_lbl = 'JPY' if ccy_used == 'JYP' else ccy_used
                 ws.cell(row=row, column=6,
-                        value=f'*  at current exchange rate of {ccy_label} 1 per {ex_rate_used:.4f}  Baht').font = f(8)
-            row += 2
+                        value=f'*  at current exchange rate of {ccy_lbl} 1 per {ex_rate_used:.4f}  Baht').font = f(8)
+                row += 1
+
+            # Contract expiry note
+            if contract_expiry is not None:
+                try:
+                    if hasattr(contract_expiry, 'day'):
+                        expiry_str = f"{contract_expiry.day}/{contract_expiry.month}/{contract_expiry.year}"
+                    else:
+                        dt = pd.to_datetime(safe_str(contract_expiry))
+                        expiry_str = f"{dt.day}/{dt.month}/{dt.year}" if pd.notna(dt) else safe_str(contract_expiry)
+                    ws.cell(row=row, column=6,
+                            value=f'* contract expires on {expiry_str}').font = f(8)
+                    row += 1
+                except Exception:
+                    pass
+
+            row += 1
 
         write_section('BI-ANNUAL 2025.1  (January – June 2025)',      bi1_rows, 'bi1')
         write_section('BI-ANNUAL 2025.2  (July – December 2025)',     bi2_rows, 'bi2')
@@ -893,7 +1221,7 @@ class ReportEngine:
 
         # ── Column widths ─────────────────────────────────────────────────────
         for i, w in enumerate(
-            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10, 13], 1
+            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10, 13, 13], 1
         ):
             ws.column_dimensions[get_column_letter(i)].width = w
 
