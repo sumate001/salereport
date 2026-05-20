@@ -128,6 +128,24 @@ def extract_year(val):
 def report_year_from_period(period: str) -> int:
     return 2025
 
+
+def _date_sort_key(val):
+    """Return a sortable datetime from a DATE_PRINTED cell value (oldest first)."""
+    if isinstance(val, datetime):
+        return val
+    if hasattr(val, 'year'):
+        return datetime(val.year, getattr(val, 'month', 1), getattr(val, 'day', 1))
+    s = safe_str(val)
+    if not s:
+        return datetime(1900, 1, 1)
+    try:
+        dt = pd.to_datetime(s)
+        if pd.notna(dt):
+            return dt.to_pydatetime()
+    except Exception:
+        pass
+    return datetime(1900, 1, 1)
+
 def strip_reprint_suffix(title: str) -> str:
     """Strip reprint/edition indicators and English-annotation suffixes from title."""
     s = re.sub(r'\s*[\(（][พP]\.\s*\d+[\)）]', '', title)
@@ -364,6 +382,8 @@ class ReportEngine:
                 isbn_order.append(isbn)
             isbn_to_group[isbn].append(r)
 
+        adv_placed = False  # advance/balance shown once per contract, not per ISBN
+
         for isbn in isbn_order:
             group = isbn_to_group[isbn]
 
@@ -422,6 +442,9 @@ class ReportEngine:
                 total_copies_sold    += run_sold
                 total_copies_printed += safe_float(r.iloc[ItemCol.COPIES_PRINTED])
 
+            # Sort print runs by date printed (oldest first)
+            run_data.sort(key=lambda x: _date_sort_key(x[0].iloc[ItemCol.DATE_PRINTED]))
+
             # Tier split: determined by each run's position in the cumulative
             # print sequence.  A run occupying [cumul+1 … cumul+printed] may
             # straddle multiple tier brackets; its sold copies are split
@@ -455,18 +478,7 @@ class ReportEngine:
                 run_portions = [[] for _ in run_data]
                 tier_split   = []
 
-            # PERIOD BALANCE (first tier row only, when advance exists)
-            period_balance = None
-            if prev_balance > 0:
-                if is_ebook:
-                    amt_thb_total = eb_net
-                elif tier_split:
-                    amt_thb_total = sum(tc * retail * tr for tc, tr in tier_split)
-                else:
-                    amt_thb_total = total_copies_sold * retail * fallback_rate
-                amt_ccy_total  = amt_thb_total / ex_rate if ex_rate else 0.0
-                amount_for_pb  = amt_thb_total if adv_cur == 'THB' else amt_ccy_total
-                period_balance = prev_balance - amount_for_pb + balance_paid
+            period_balance = None  # set at contract level after all ISBNs are processed
 
             # UNSOLD COPIES (new prints only)
             any_new_print = any(
@@ -487,8 +499,7 @@ class ReportEngine:
             #  • Run straddling ≥2 tiers            → one print_run_tier row per portion
             # Advance / balance always go to the very first row (first run, first tier).
             if multiple_runs:
-                any_prt_row   = False   # any print_run_tier row created
-                adv_placed    = False   # advance/balance already written
+                any_prt_row = False   # any print_run_tier row created
 
                 for idx, (r, run_sold) in enumerate(run_data):
                     is_first_run = (idx == 0)
@@ -497,9 +508,7 @@ class ReportEngine:
                     run_printed  = safe_float(r.iloc[ItemCol.COPIES_PRINTED])
                     portions     = run_portions[idx]   # [(p_printed, tier_idx, rate), …]
 
-                    # Title column rule (per-run index within each ISBN group):
-                    #   run 0 → EN title (from contract/intra), run 1 → TH title
-                    #   (use this run's own TITLE_TH for accuracy), run 2+ → blank
+                    # Title column rule: run 0 → EN, run 1 → TH, run 2+ → blank
                     if idx == 0:
                         run_title_col = title_display
                     elif idx == 1:
@@ -580,7 +589,7 @@ class ReportEngine:
             job_first       = safe_str(first_r.iloc[ItemCol.JOB])
             has_inline_calc = multiple_runs and any_prt_row
 
-            def make_tier_row(tc, tr, is_first_tier):
+            def make_tier_row(tc, tr, is_first_tier, want_adv=False):
                 amt_thb = eb_net if is_ebook else tc * retail * tr
                 return {
                     'row_type':       'tier',
@@ -599,13 +608,13 @@ class ReportEngine:
                     'amount_thb':     amt_thb,
                     'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
                     'currency':       currency,
-                    'adv':            adv           if is_first_tier else 0.0,
+                    'adv':            adv           if want_adv else 0.0,
                     'adv_currency':   adv_cur,
-                    'prev_balance':   prev_balance  if is_first_tier else 0.0,
-                    'balance_paid':   balance_paid  if is_first_tier else 0.0,
-                    'period_balance': period_balance if is_first_tier else None,
-                    'unsold_copies':  unsold_copies  if is_first_tier else None,
-                    'stock_account':  stock_account  if is_first_tier else None,
+                    'prev_balance':   prev_balance  if want_adv else 0.0,
+                    'balance_paid':   balance_paid  if want_adv else 0.0,
+                    'period_balance': period_balance if want_adv else None,
+                    'unsold_copies':  unsold_copies  if want_adv else None,
+                    'stock_account':  stock_account  if want_adv else None,
                     'is_ebook':       is_ebook,
                     'ex_rate':        ex_rate,
                 }
@@ -613,12 +622,39 @@ class ReportEngine:
             if not has_inline_calc:
                 if tier_split:
                     for j, (tc, tr) in enumerate(tier_split):
-                        rows.append(make_tier_row(tc, tr, is_first_tier=(j == 0)))
+                        _want_adv = (j == 0) and not adv_placed
+                        if _want_adv:
+                            adv_placed = True
+                        rows.append(make_tier_row(tc, tr, is_first_tier=(j == 0), want_adv=_want_adv))
                 else:
-                    rows.append(make_tier_row(total_copies_sold, fallback_rate, is_first_tier=True))
+                    _want_adv = not adv_placed
+                    if _want_adv:
+                        adv_placed = True
+                    rows.append(make_tier_row(total_copies_sold, fallback_rate, is_first_tier=True, want_adv=_want_adv))
 
             # Blank separator row between ISBN groups (matches sample layout)
             rows.append({'row_type': 'blank'})
+
+        # Contract-level period balance = Previous Balance (ccy) − Σ AMOUNT (ccy)
+        # Placed once on the first non-blank row; covers all ISBNs in this contract.
+        # Previous balance (col 72) stored in THB — convert to payment currency via ex_rate.
+        total_amount_ccy = sum(
+            (row.get('amount_ccy') or 0.0)
+            for row in rows
+            if row.get('row_type') != 'blank'
+        )
+        first_data = next((r for r in rows if r.get('row_type') != 'blank'), None)
+        if first_data is not None:
+            ex = first_data.get('ex_rate') or 1.0
+            raw_prev = first_data.get('prev_balance') or 0.0
+            prev_ccy = raw_prev / ex if ex else raw_prev
+            contract_pb = (prev_ccy - total_amount_ccy) if (prev_ccy != 0 or total_amount_ccy > 0) else None
+            pb_placed = False
+            for row in rows:
+                if row.get('row_type') == 'blank':
+                    continue
+                row['period_balance'] = contract_pb if not pb_placed else None
+                pb_placed = True
 
         # Remove trailing blank row
         while rows and rows[-1].get('row_type') == 'blank':
@@ -1073,7 +1109,7 @@ class ReportEngine:
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
              '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ', 'Stock (เล่ม)'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
-             '', '', '(THB)', '(THB)', '(THB)', '(THB)', 'COPIES', 'Account', 'คงเหลือ Account'],
+             '', '', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', 'COPIES', 'Account', 'คงเหลือ Account'],
         ]
         for hdr in hdr_rows:
             for c_idx, val in enumerate(hdr, 1):
@@ -1122,7 +1158,7 @@ class ReportEngine:
                     put(6, d['retail_price'] or None,   NUM)
                     put(7, d['royalty_rate'] or None,   PCT)
                     put(8, d['copies_sold'] or None,    NUM)
-                    put(9,  0.0 if (d['retail_price'] and not d['is_ebook']) else None, NUM)
+                    put(9,  None, NUM)
                     put(10, None)
                     put(11, d['adv']          if d['adv'] is not None else None, NUM)
                     put(12, d['prev_balance'] if d['prev_balance'] is not None else None, NUM)
