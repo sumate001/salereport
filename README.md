@@ -1,64 +1,22 @@
 # Sales Royalty Report Generator
 
-ระบบสร้างรายงาน Sales Royalty สำหรับลิขสิทธิ์ต่างประเทศ สร้างไฟล์ Excel แยกตาม Agency และ ISBN โดยอัตโนมัติ
+ระบบสร้างรายงาน Sales Royalty สำหรับลิขสิทธิ์ต่างประเทศ  
+สร้างไฟล์ Excel แยกตาม Agency และ ISBN โดยอัตโนมัติ พร้อม Web UI สำหรับ upload, generate, และดาวน์โหลด
 
-**Version 0.25**
-
----
-
-## ไฟล์ที่ต้องใช้
-
-| ไฟล์ | Sheet | รายละเอียด |
-|---|---|---|
-| `ยอดขาย-ลิขสิทธิ์.xlsx` | `Item` | Master ยอดขายและข้อมูลหนังสือทุกเล่ม |
-| `1.Intra RptRightAcc_Annual-Western.xlsx` | (sheet แรก) | สัญญา Annual ฝั่ง Western |
-| `2.Intra RptRightAcc_Annual-Asia.xlsx` | (sheet แรก) | สัญญา Annual ฝั่ง Asia |
-| `3.Intra RptRightAcc_BI-Annual-Western.xlsx` | (sheet แรก) | สัญญา BI-Annual ฝั่ง Western |
-| `4.Intra RptRightAcc_BI-Annual-Asia.xlsx` | (sheet แรก) | สัญญา BI-Annual ฝั่ง Asia |
-| `อัตราแลกเปลี่ยน.xlsx` | `อัตราแลกเปลี่ยน` | Exchange rate รายไตรมาส |
+**Version 0.44**
 
 ---
 
-## โครงสร้าง Output (ZIP)
+## ไฟล์ที่ต้องใช้ (6 ไฟล์)
 
-```
-SalesReports_All_{period}.zip
-├── Agency_Name_A/
-│   ├── 9786161856748 - ชื่อหนังสือ.xlsx
-│   ├── 9786161879914 - ชื่อหนังสือ.xlsx
-│   └── ...
-├── Agency_Name_B/
-│   └── ...
-```
-
-แต่ละไฟล์ Excel มีส่วนประกอบดังนี้:
-- Header: SALES REPORT / KADOKAWA CORPORATION / Agency / Publisher / Period
-- ตาราง: JOB, ISBN, Title (TH+EN), Copies Printed, Date Printed, Retail Price, Royalty Rate, Copies Sold, Amount (THB), Amount (สกุลเงิน), Advanced Payment, Previous Balance
-
----
-
-## การคำนวณ Royalty
-
-### Single Rate
-ถ้าไฟล์ Intra ไม่มีเงื่อนไข Tiered → ใช้ Royalty Rate จาก Item file เดียว
-
-### Tiered Rate (ขั้นบันได)
-ถ้าไฟล์ Intra กำหนด `rt1_text / rt1_price` ขึ้นไป → แบ่งคำนวณตามช่วงยอดขาย แสดงแยกบรรทัดในรายงาน
-
-| rt_text | ความหมาย |
-|---|---|
-| `a1-3000` | เล่มที่ 1–3000 |
-| `a3001` | เล่มที่ 3001 ขึ้นไป |
-| `a` (ไม่มีตัวเลข) | ไม่นำมาคิด |
-
-**ตัวอย่าง** ยอดขาย 3,500 เล่ม / Tier 1: 7% / Tier 2: 8%
-
-| Copies | Rate | Amount |
-|---|---|---|
-| 3,000 | 7% | xxx |
-| 500 | 8% | xxx |
-
-Exchange Rate ใช้ตามไตรมาส: BI-Annual H1 → Q2, BI-Annual H2 → Q4, Annual → Q4
+| Slot | ไฟล์ | Sheet | รายละเอียด |
+|------|------|-------|-----------|
+| item | `ยอดขาย-ลิขสิทธิ์.xlsx` | `Item` | Master ยอดขายและข้อมูลหนังสือทุกเล่ม |
+| intra_1 | `1.Intra RptRightAcc_Annual-Western.xlsx` | sheet แรก | สัญญา Annual ฝั่ง Western |
+| intra_2 | `2.Intra RptRightAcc_Annual-Asia.xlsx` | sheet แรก | สัญญา Annual ฝั่ง Asia |
+| intra_3 | `3.Intra RptRightAcc_BI-Annual-Western.xlsx` | sheet แรก | สัญญา BI-Annual ฝั่ง Western |
+| intra_4 | `4.Intra RptRightAcc_BI-Annual-Asia.xlsx` | sheet แรก | สัญญา BI-Annual ฝั่ง Asia |
+| exchange | `อัตราแลกเปลี่ยน.xlsx` | `อัตราแลกเปลี่ยน` | Exchange rate รายไตรมาส |
 
 ---
 
@@ -77,39 +35,101 @@ chmod +x start.sh
 
 เปิดเบราว์เซอร์ที่ `http://localhost:5174`
 
-### รันครั้งถัดไป (ถ้า package ติดตั้งแล้ว)
+### รันครั้งถัดไป (package ติดตั้งแล้ว)
 
 ```bash
 # Terminal 1 — Backend
-cd backend
-python3 -m uvicorn main:app --reload --port 8001
+cd backend && python3 -m uvicorn main:app --reload --port 8001
 
 # Terminal 2 — Frontend
-cd frontend
-npm run dev
+cd frontend && npm run dev
 ```
 
 ---
 
 ## การใช้งาน
 
-1. **อัปโหลดไฟล์** — เลือกไฟล์ทั้ง 6 ไฟล์
-2. **เลือก Period** — BI-Annual 2025.1 / BI-Annual 2025.2 / Annual 2025 / ทุกรอบ
-3. **สร้างรายงาน** — ระบบสร้าง Excel ทุก Agency อัตโนมัติ
-4. **ดาวน์โหลด ZIP**
+1. **อัปโหลดชุดข้อมูล** — เลือกไฟล์ทั้ง 6 ไฟล์พร้อมกัน ระบบจะจำชุดข้อมูลไว้
+2. **เลือก Period** — BI-Annual 2025.1 / BI-Annual 2025.2 / Annual 2025 (เลือกได้หลายรอบพร้อมกัน)
+3. **กรองตามหนังสือ** (ไม่บังคับ) — พิมพ์ชื่อหนังสือ ค้นหา แล้วเลือก  
+   ถ้าเลือกหลายเล่ม ระบบจะ generate **แยกต่อเล่ม** (2 เล่ม × 2 รอบ = 4 ไฟล์)
+4. **กด "สร้าง Report"** — ผลลัพธ์แสดงที่แผงขวา พร้อมดาวน์โหลดทันที
+5. **ประวัติ** — ด้านล่างแสดง report ทุกชุดที่เคย generate พร้อม badge ชื่อหนังสือ
+
+---
+
+## โครงสร้าง Output (ZIP)
+
+```
+report_{date}_{time}_{period}_{book_title}.zip
+└── Agency_Name/
+    └── Publisher_Name/
+        ├── 9786161856748 - A Dance with Dragons - มังกรร่อนระบำ.xlsx
+        └── ...
+```
+
+แต่ละไฟล์ Excel ประกอบด้วย:
+- **Header**: SALES REPORT · KADOKAWA CORPORATION · Agency · Publisher · Period
+- **ตาราง**: JOB · ISBN · Title (TH+EN) · Copies Printed · Date Printed · Retail Price · Royalty Rate · Copies Sold · Amount (THB) · Amount (สกุลเงิน) · Advanced Payment · Previous Balance
+
+---
+
+## การคำนวณ Royalty
+
+### Single Rate
+ถ้าไม่มีเงื่อนไข Tiered → ใช้ Royalty Rate จาก Item file เดียว
+
+### Tiered Rate (ขั้นบันได)
+ถ้า Intra file กำหนด `rt1_text / rt1_price` → แบ่งคำนวณตามช่วงยอดขาย แสดงแยกบรรทัด
+
+| rt_text | ความหมาย |
+|---------|---------|
+| `a1-3000` | เล่มที่ 1–3,000 |
+| `a3001` | เล่มที่ 3,001 ขึ้นไป |
+| `a` | ไม่นำมาคิด |
+
+ตัวอย่าง: ยอดขาย 3,500 เล่ม · tier1 = 7% · tier2 = 8%
+
+| Copies | Rate | Amount |
+|--------|------|--------|
+| 3,000 | 7% | xxx |
+| 500 | 8% | xxx |
+
+### Exchange Rate
+- BI-Annual H1 → Q2 · BI-Annual H2 → Q4 · Annual → Q4
 
 ---
 
 ## Tech Stack
 
-- **Backend**: FastAPI + pandas + openpyxl
-- **Frontend**: React + Vite + Tailwind CSS
+| Layer | เทคโนโลยี |
+|-------|-----------|
+| Backend | Python 3.9 · FastAPI · pandas · openpyxl |
+| Frontend | React 18 · Vite 5 · Tailwind CSS 3 |
+| Storage | ไฟล์ใน `~/.sale_report/` (ไม่มี database) |
+
+---
+
+## สำหรับ Developer
+
+ดู **[DEVELOPER.md](DEVELOPER.md)** สำหรับ:
+- Architecture diagram และ data flow
+- API endpoint reference ทั้งหมด
+- Column mapping ของทุกไฟล์ input
+- Known data issues และ workarounds
+- Hardcoded values ที่ต้องแก้ก่อนปี 2026
+- วิธีเพิ่ม period / widget / input file ใหม่
 
 ---
 
 ## Changelog
 
 | Version | รายละเอียด |
-|---|---|
-| v0.25 | Tiered royalty rate (rt1–rt5), Title แสดง TH+EN, Date Printed format "May 31", AMOUNT header แสดง currency จริง |
+|---------|----------|
+| v0.44 | Generate แยกต่อเล่ม · error cards ใน ResultsPanel · filter_label badge ในประวัติ |
+| v0.43 | ชื่อ ZIP รวม book title · filter report ตามชื่อหนังสือ |
+| v0.42 | ชื่อไฟล์ Excel รวม EN+TH title |
+| v0.40 | Report layout ตรงกับ reference 2023 |
+| v0.37 | Web UI · dataset management · history panel |
+| v0.25 | Tiered royalty (rt1–rt5) · title TH+EN · AMOUNT header แสดง currency |
 | v1.0 | Initial release |
