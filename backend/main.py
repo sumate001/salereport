@@ -204,9 +204,10 @@ def download_dataset_file(dataset_id: str, slot: str):
 # ── Generate ───────────────────────────────────────────────────────────────────
 
 class GenerateAllReq(BaseModel):
-    dataset_id:  str
-    period:      str       = "annual"
-    isbn_filter: list[str] = []
+    dataset_id:   str
+    period:       str       = "annual"
+    isbn_filter:  list[str] = []
+    filter_label: str       = ""
 
 
 @app.post("/api/generate-all")
@@ -225,7 +226,11 @@ def generate_all(req: GenerateAllReq):
 
     now     = datetime.now()
     ts_slug = now.strftime("%Y%m%d_%H%M%S")
-    pname   = f"report_{ts_slug}_{req.period}.zip"
+    label_slug = ""
+    if req.filter_label:
+        import re as _re
+        label_slug = "_" + _re.sub(r'[\\/:*?"<>|]', '_', req.filter_label)[:60]
+    pname   = f"report_{ts_slug}_{req.period}{label_slug}.zip"
     dest    = REPORTS_DIR / pname
     shutil.copy2(zip_path, dest)
     size = dest.stat().st_size

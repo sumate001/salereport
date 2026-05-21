@@ -78,6 +78,11 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
     setReportErr('')
     const periods = PERIODS.filter(p => selected.has(p.id))
     const isbnFilter = selectedBooks.flatMap(b => b.isbns)
+    const filterLabel = selectedBooks.length > 0
+      ? selectedBooks.length === 1
+        ? (selectedBooks[0].title_en || selectedBooks[0].title_th)
+        : `${selectedBooks[0].title_en || selectedBooks[0].title_th} +${selectedBooks.length - 1}`
+      : ''
     for (let i = 0; i < periods.length; i++) {
       const p = periods[i]
       setStatus(`${p.label} (${i + 1}/${periods.length})`)
@@ -86,9 +91,10 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify({
-            dataset_id:  activeDataset.id,
-            period:      p.id,
-            isbn_filter: isbnFilter,
+            dataset_id:   activeDataset.id,
+            period:       p.id,
+            isbn_filter:  isbnFilter,
+            filter_label: filterLabel,
           }),
         })
         const d = await r.json()
