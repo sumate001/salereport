@@ -302,7 +302,20 @@ def delete_report(filename: str):
     if not filename.endswith(".zip") or "/" in filename or ".." in filename:
         raise HTTPException(403, "Access denied")
     (REPORTS_DIR / filename).unlink(missing_ok=True)
-    (REPORTS_DIR / filename.replace(".zip", ".json")).unlink(missing_ok=True)
+    # Try exact-match JSON first (new naming: includes label_slug)
+    json_exact = REPORTS_DIR / filename.replace(".zip", ".json")
+    if json_exact.exists():
+        json_exact.unlink()
+    else:
+        # Fallback: scan for any JSON whose "filename" field matches this ZIP
+        # (old naming convention before v0.44 did not include label_slug in JSON filename)
+        for jf in REPORTS_DIR.glob("report_*.json"):
+            try:
+                if json.loads(jf.read_text(encoding="utf-8")).get("filename") == filename:
+                    jf.unlink()
+                    break
+            except Exception:
+                pass
     return {"ok": True}
 
 

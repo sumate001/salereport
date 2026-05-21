@@ -38,10 +38,10 @@ function OutputList({ reports, snapshots, onDeleteReport, onDeleteSnap }) {
   return (
     <div className="space-y-2">
       {reports.map(r => (
-        <div key={r.filename} className="flex items-start gap-2 group">
+        <div key={r.filename} className="flex items-start gap-2">
           <span className="text-base mt-0.5">📦</span>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <a
                 href={`/api/reports/${encodeURIComponent(r.filename)}`}
                 download={r.filename}
@@ -54,56 +54,59 @@ function OutputList({ reports, snapshots, onDeleteReport, onDeleteSnap }) {
                   {r.filter_label}
                 </span>
               )}
-              <button
-                onClick={e => onDeleteReport(r.filename, e)}
-                className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 text-xs transition-opacity"
-                title="ลบ"
-              >✕</button>
             </div>
             <p className="text-[11px] text-gray-400">
               {fmtTs(r.ts_slug)}{r.size_bytes ? ` · ${fmtSize(r.size_bytes)}` : ''}
             </p>
           </div>
-          <a
-            href={`/api/reports/${encodeURIComponent(r.filename)}`}
-            download={r.filename}
-            className="shrink-0 text-[11px] px-2 py-1 bg-green-50 text-green-700 border border-green-200 rounded-lg hover:bg-green-100 transition-colors"
-          >
-            ⬇ ZIP
-          </a>
+          <div className="shrink-0 flex items-center gap-1.5">
+            <a
+              href={`/api/reports/${encodeURIComponent(r.filename)}`}
+              download={r.filename}
+              className="text-[11px] px-2 py-1 bg-green-50 text-green-700 border border-green-200 rounded-lg hover:bg-green-100 transition-colors"
+            >
+              ⬇ ZIP
+            </a>
+            <button
+              onClick={e => onDeleteReport(r.filename, e)}
+              className="p-1 rounded-md text-red-300 hover:text-red-600 hover:bg-red-50 border border-red-100 hover:border-red-200 transition-colors"
+              title="ลบรายงานนี้"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+              </svg>
+            </button>
+          </div>
         </div>
       ))}
       {snapshots.map(s => (
-        <div key={s.filename} className="flex items-start gap-2 group">
+        <div key={s.filename} className="flex items-start gap-2">
           <span className="text-base mt-0.5">📊</span>
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <a
-                href={`/api/snapshots/${s.filename}`}
-                target="_blank"
-                rel="noreferrer"
-                className="text-sm font-semibold text-brand hover:underline"
-              >
-                Dashboard
-              </a>
-              <button
-                onClick={e => onDeleteSnap(s.filename, e)}
-                className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 text-xs transition-opacity"
-                title="ลบ"
-              >✕</button>
-            </div>
+            <p className="text-sm font-semibold text-brand">Dashboard</p>
             <p className="text-[11px] text-gray-400">
               {s.generated_at_display || fmtTs(snapSlug(s.filename))}
             </p>
           </div>
-          <a
-            href={`/api/snapshots/${s.filename}`}
-            target="_blank"
-            rel="noreferrer"
-            className="shrink-0 text-[11px] px-2 py-1 bg-brand/5 text-brand border border-brand/20 rounded-lg hover:bg-brand/10 transition-colors"
-          >
-            ↗ เปิด
-          </a>
+          <div className="shrink-0 flex items-center gap-1.5">
+            <a
+              href={`/api/snapshots/${s.filename}`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] px-2 py-1 bg-brand/5 text-brand border border-brand/20 rounded-lg hover:bg-brand/10 transition-colors"
+            >
+              ↗ เปิด
+            </a>
+            <button
+              onClick={e => onDeleteSnap(s.filename, e)}
+              className="p-1 rounded-md text-red-300 hover:text-red-600 hover:bg-red-50 border border-red-100 hover:border-red-200 transition-colors"
+              title="ลบ Dashboard นี้"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+              </svg>
+            </button>
+          </div>
         </div>
       ))}
     </div>
@@ -149,7 +152,11 @@ function HistoryRow({ ds, reports, snapshots, onDeleteDataset, onDeleteReport, o
             <button onClick={() => { setEditVal(ds.label); setEditingLabel(true) }}
               className="text-gray-300 hover:text-brand text-xs px-1 transition-colors" title="แก้ชื่อ">✎</button>
             <button onClick={() => onDeleteDataset(ds.id)}
-              className="text-gray-300 hover:text-red-400 text-xs px-1 transition-colors" title="ลบชุดข้อมูล">✕</button>
+              className="p-1 rounded text-red-300 hover:text-red-600 hover:bg-red-50 transition-colors" title="ลบชุดข้อมูล">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+              </svg>
+            </button>
           </>
         )}
       </div>
