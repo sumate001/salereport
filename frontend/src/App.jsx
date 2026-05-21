@@ -8,6 +8,7 @@ export default function App() {
   const [activeDataset,    setActiveDataset]    = useState(null)
   const [datasets,         setDatasets]         = useState([])
   const [currentReports,   setCurrentReports]   = useState([])
+  const [currentErrors,    setCurrentErrors]    = useState([])
   const [currentDashboard, setCurrentDashboard] = useState(null)
   const [historyKey,       setHistoryKey]       = useState(0)
 
@@ -58,9 +59,19 @@ export default function App() {
     }
   }
 
+  const handleGenerationStart = () => {
+    setCurrentReports([])
+    setCurrentErrors([])
+    setCurrentDashboard(null)
+  }
+
   const handleReportGenerated = (report) => {
     setCurrentReports(prev => [...prev, report])
     setHistoryKey(k => k + 1)
+  }
+
+  const handleReportError = (err) => {
+    setCurrentErrors(prev => [...prev, err])
   }
 
   const handleDashboardGenerated = (dash) => {
@@ -89,11 +100,14 @@ export default function App() {
           />
           <GeneratePanel
             activeDataset={activeDataset}
+            onGenerationStart={handleGenerationStart}
             onReportGenerated={handleReportGenerated}
+            onReportError={handleReportError}
             onDashboardGenerated={handleDashboardGenerated}
           />
           <ResultsPanel
             reports={currentReports}
+            errors={currentErrors}
             dashboard={currentDashboard}
           />
         </div>

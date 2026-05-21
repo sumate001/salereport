@@ -43,12 +43,17 @@ function OutputList({ reports, snapshots, onDeleteReport, onDeleteSnap }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <a
-                href={`/api/reports/${r.filename}`}
+                href={`/api/reports/${encodeURIComponent(r.filename)}`}
                 download={r.filename}
                 className="text-sm font-semibold text-gray-700 hover:text-brand transition-colors"
               >
                 {r.period_label}
               </a>
+              {r.filter_label && (
+                <span className="text-[10px] px-1.5 py-0.5 bg-brand/8 text-brand border border-brand/20 rounded-full truncate max-w-[160px]">
+                  {r.filter_label}
+                </span>
+              )}
               <button
                 onClick={e => onDeleteReport(r.filename, e)}
                 className="opacity-0 group-hover:opacity-100 text-gray-300 hover:text-red-400 text-xs transition-opacity"
@@ -60,7 +65,7 @@ function OutputList({ reports, snapshots, onDeleteReport, onDeleteSnap }) {
             </p>
           </div>
           <a
-            href={`/api/reports/${r.filename}`}
+            href={`/api/reports/${encodeURIComponent(r.filename)}`}
             download={r.filename}
             className="shrink-0 text-[11px] px-2 py-1 bg-green-50 text-green-700 border border-green-200 rounded-lg hover:bg-green-100 transition-colors"
           >

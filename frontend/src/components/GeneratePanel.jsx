@@ -16,11 +16,10 @@ function Spinner() {
   )
 }
 
-export default function GeneratePanel({ activeDataset, onReportGenerated, onDashboardGenerated }) {
+export default function GeneratePanel({ activeDataset, onGenerationStart, onReportGenerated, onReportError, onDashboardGenerated }) {
   const [selected,      setSelected]      = useState(new Set(['annual']))
   const [genReport,     setGenReport]     = useState(false)
   const [genDash,       setGenDash]       = useState(false)
-  const [reportErr,     setReportErr]     = useState('')
   const [dashErr,       setDashErr]       = useState('')
   const [status,        setStatus]        = useState('')
 
@@ -75,17 +74,23 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
   const handleGenerateReport = async () => {
     if (!activeDataset || selected.size === 0 || genReport) return
     setGenReport(true)
-    setReportErr('')
+    onGenerationStart()
     const periods = PERIODS.filter(p => selected.has(p.id))
-    const isbnFilter = selectedBooks.flatMap(b => b.isbns)
-    const filterLabel = selectedBooks.length > 0
-      ? selectedBooks.length === 1
-        ? (selectedBooks[0].title_en || selectedBooks[0].title_th)
-        : `${selectedBooks[0].title_en || selectedBooks[0].title_th} +${selectedBooks.length - 1}`
-      : ''
-    for (let i = 0; i < periods.length; i++) {
-      const p = periods[i]
-      setStatus(`${p.label} (${i + 1}/${periods.length})`)
+
+    // Build job list: if books selected → one job per book per period; else one job per period
+    const jobs = selectedBooks.length > 0
+      ? selectedBooks.flatMap(book =>
+          periods.map(p => ({
+            period:       p,
+            isbn_filter:  book.isbns,
+            filter_label: book.title_en || book.title_th,
+          }))
+        )
+      : periods.map(p => ({ period: p, isbn_filter: [], filter_label: '' }))
+
+    for (let i = 0; i < jobs.length; i++) {
+      const { period: p, isbn_filter, filter_label } = jobs[i]
+      setStatus(`${p.label}${filter_label ? ` — ${filter_label}` : ''} (${i + 1}/${jobs.length})`)
       try {
         const r = await fetch('/api/generate-all', {
           method:  'POST',
@@ -93,8 +98,8 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
           body:    JSON.stringify({
             dataset_id:   activeDataset.id,
             period:       p.id,
-            isbn_filter:  isbnFilter,
-            filter_label: filterLabel,
+            isbn_filter,
+            filter_label,
           }),
         })
         const d = await r.json()
@@ -104,8 +109,10 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
         }
         onReportGenerated(d)
       } catch (e) {
-        setReportErr(e.message)
-        break
+        onReportError({
+          label:   filter_label ? `${p.label} — ${filter_label}` : p.label,
+          message: e.message,
+        })
       }
     }
     setStatus('')
@@ -282,7 +289,6 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
               )}
             </div>
 
-            {reportErr && <p className="text-xs text-red-500">{reportErr}</p>}
             {status && genReport && (
               <p className="text-xs text-brand">กำลังสร้าง {status}</p>
             )}
@@ -295,11 +301,14 @@ export default function GeneratePanel({ activeDataset, onReportGenerated, onDash
                   : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
             >
-              {genReport ? <><Spinner /> กำลังสร้าง...</> : (
-                selectedBooks.length > 0
-                  ? `▶ สร้าง Report (${selectedBooks.length} เล่ม${selected.size > 1 ? `, ${selected.size} รอบ` : ''})`
-                  : `▶ สร้าง Report${selected.size > 1 ? ` (${selected.size} รอบ)` : ''}`
-              )}
+              {genReport ? <><Spinner /> กำลังสร้าง...</> : (() => {
+                const total = selectedBooks.length > 0
+                  ? selectedBooks.length * selected.size
+                  : selected.size
+                return total > 1
+                  ? `▶ สร้าง Report (${total} ไฟล์)`
+                  : '▶ สร้าง Report'
+              })()}
             </button>
           </div>
 

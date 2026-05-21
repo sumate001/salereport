@@ -221,6 +221,8 @@ def generate_all(req: GenerateAllReq):
             req.period, s["output_dir"],
             isbn_filter=req.isbn_filter if req.isbn_filter else None,
         )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Generate ล้มเหลว: {e}")
 
@@ -234,7 +236,8 @@ def generate_all(req: GenerateAllReq):
     dest    = REPORTS_DIR / pname
     shutil.copy2(zip_path, dest)
     size = dest.stat().st_size
-    (REPORTS_DIR / f"report_{ts_slug}_{req.period}.json").write_text(
+    json_name = f"report_{ts_slug}_{req.period}{label_slug}.json"
+    (REPORTS_DIR / json_name).write_text(
         json.dumps({
             "filename":      pname,
             "ts_slug":       ts_slug,
@@ -243,6 +246,7 @@ def generate_all(req: GenerateAllReq):
             "size_bytes":    size,
             "dataset_id":    req.dataset_id,
             "dataset_label": s.get("label", ""),
+            "filter_label":  req.filter_label,
         }, ensure_ascii=False),
         encoding="utf-8",
     )

@@ -993,6 +993,13 @@ class ReportEngine:
                         arcname = os.path.relpath(fpath, xlsx_tmp)
                         zf.write(fpath, arcname)
         shutil.rmtree(xlsx_tmp, ignore_errors=True)
+
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            if not zf.namelist():
+                os.remove(zip_path)
+                period_label = {'bi1': 'BI-Annual 1', 'bi2': 'BI-Annual 2', 'annual': 'Annual'}.get(period, period)
+                raise ValueError(f"ไม่พบข้อมูล {period_label} — ตรวจสอบว่าคอลัมน์ Annual/BI-Annual มีค่า 'BI' หรือไม่")
+
         return zip_path
 
     # ── Dashboard data ───────────────────────────────────────────────────────────
