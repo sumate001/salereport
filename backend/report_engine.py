@@ -931,15 +931,18 @@ class ReportEngine:
                 if not any([bi1_rows, bi2_rows, an_rows]):
                     continue
 
-                # File name: use title of first matching ISBN, strip volume/reprint suffix
+                # File name: ISBN - EN title - TH title
                 primary_items = contract_items[isbn_series.isin([all_isbns[0]])]
                 if primary_items.empty:
                     primary_items = contract_items.iloc[:1]
-                raw_title   = safe_str(primary_items.iloc[0, ItemCol.TITLE_TH])
-                clean_title = strip_reprint_suffix(raw_title)
-                # Strip volume numbers like " 5.1", " 5.2" anywhere in the title
-                clean_title = re.sub(r'\s+\d+\.\d+', '', clean_title).strip()
-                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{all_isbns[0]} - {clean_title}")
+                _row0       = primary_items.iloc[0]
+                _th_raw     = strip_reprint_suffix(safe_str(_row0.iloc[ItemCol.TITLE_TH]))
+                _th_clean   = re.sub(r'\s+\d+\.\d+', '', _th_raw).strip()
+                _en_raw     = strip_reprint_suffix(safe_str(_row0.iloc[ItemCol.TITLE_EN]))
+                # exclude values that look like agency names (end with ";")
+                _en_clean   = '' if _en_raw.endswith(';') else _en_raw
+                _label      = f"{_en_clean} - {_th_clean}" if _en_clean else _th_clean
+                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{all_isbns[0]} - {_label}")[:180]
 
                 self._write_excel(
                     os.path.join(pub_dir, f"{safe_name}.xlsx"),
@@ -969,9 +972,12 @@ class ReportEngine:
                 if not any([bi1_rows, bi2_rows, an_rows]):
                     continue
 
-                raw_title   = safe_str(isbn_items.iloc[0, ItemCol.TITLE_TH])
-                clean_title = strip_reprint_suffix(raw_title)
-                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{isbn} - {clean_title}")
+                _row0     = isbn_items.iloc[0]
+                _th_clean = strip_reprint_suffix(safe_str(_row0.iloc[ItemCol.TITLE_TH]))
+                _en_raw   = strip_reprint_suffix(safe_str(_row0.iloc[ItemCol.TITLE_EN]))
+                _en_clean = '' if _en_raw.endswith(';') else _en_raw
+                _label    = f"{_en_clean} - {_th_clean}" if _en_clean else _th_clean
+                safe_name = re.sub(r'[\\/:*?"<>|]', '_', f"{isbn} - {_label}")[:180]
                 self._write_excel(
                     os.path.join(pub_dir, f"{safe_name}.xlsx"),
                     country, agency_label, publisher, intermediate_agent, contract_expiry, period,
