@@ -146,6 +146,22 @@ def _date_sort_key(val):
         pass
     return datetime(1900, 1, 1)
 
+def book_canon_key(title: str) -> str:
+    """Aggressive normalisation used only for grouping books in search.
+    Strips volume numbers and reprint markers so all print-runs of the same
+    title collapse to one search result.
+    """
+    s = strip_reprint_suffix(title)
+    s = re.sub(r'\s*[\(（][พP]\.\s*\d+(?:-\d+)?[\)）]', '', s)  # (พ.1) (พ.1-2) (P.3)
+    s = re.sub(r'\s*\(\d+(?:-\d+)?\)', '', s)                    # (1) (1-2)
+    s = re.sub(r'\s+\d+\.\d+', '', s)                            # " 5.1"  " 1.2"
+    s = re.sub(r'\s+พ\.?\s*\d+', '', s)                          # " พ.5"
+    s = re.sub(r'\s*:\s*[Vv]ol(?:ume)?\s*\d+', '', s)            # ": Volume 1"
+    s = re.sub(r'\s+[Vv]ol(?:ume)?\s*\d+', '', s)                # " Volume 2"
+    s = re.sub(r'\s+\d+$', '', s)                                 # trailing " 2"
+    return s.strip().lower()
+
+
 def strip_reprint_suffix(title: str) -> str:
     """Strip reprint/edition indicators and English-annotation suffixes from title."""
     s = re.sub(r'\s*[\(（][พP]\.\s*\d+[\)）]', '', title)
@@ -269,6 +285,80 @@ class ReportEngine:
 
     def _clean(self, series):
         return series.fillna('').astype(str).str.strip()
+
+    def _build_isbn_to_contract(self):
+        """Build isbn→contract_idx map from intra file. Returns (contracts, isbn_to_contract)."""
+        self._init_intra_cols()
+        contracts = []
+        isbn_to_contract = {}
+        for _, intra_row in self.intra.iterrows():
+            isbns = []
+            for isbn_col in self._intra_isbn_cols:
+                val = safe_str(intra_row.iloc[isbn_col]).strip()
+                m = re.match(r'(978\d{10})', val)
+                if m:
+                    isbn_val = m.group(1)
+                    if isbn_val not in isbns:
+                        isbns.append(isbn_val)
+            if not isbns:
+                continue
+            idx = len(contracts)
+            contracts.append({'isbns': isbns})
+            for isbn in isbns:
+                if isbn not in isbn_to_contract:
+                    isbn_to_contract[isbn] = idx
+        return contracts, isbn_to_contract
+
+    def get_books(self, q: str = '') -> list:
+        """Return title-level [{isbns, title_th, title_en}] — one entry per canonical title.
+
+        All print runs / ISBNs sharing the same stripped title are merged into one result,
+        so the user never sees duplicate entries for the same book.
+        """
+        q_lower = q.lower().strip()
+        groups       = {}   # canon_key -> {isbns, isbn_set, title_th, title_en}
+        order        = []   # first-appearance order
+        isbn_to_key  = {}   # isbn -> canon_key already assigned
+
+        for _, row in self.item.iterrows():
+            isbn = safe_str(row.iloc[ItemCol.ISBN])
+            if not isbn or not re.match(r'978\d{10}', isbn):
+                continue
+            title_th = strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_TH]))
+            title_en = strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_EN]))
+            key = book_canon_key(title_th) or book_canon_key(title_en)
+            if not key:
+                continue
+            # If this ISBN was already put in another group, follow that group
+            key = isbn_to_key.get(isbn, key)
+            if key not in groups:
+                groups[key] = {
+                    'isbns':    [],
+                    'isbn_set': set(),
+                    'title_th': title_th,
+                    'title_en': title_en,
+                }
+                order.append(key)
+            g = groups[key]
+            if isbn not in g['isbn_set']:
+                g['isbns'].append(isbn)
+                g['isbn_set'].add(isbn)
+                isbn_to_key[isbn] = key
+
+        results = []
+        for canonical in order:
+            g = groups[canonical]
+            if q_lower:
+                if (q_lower not in g['title_th'].lower()
+                        and q_lower not in g['title_en'].lower()
+                        and not any(q_lower in i for i in g['isbns'])):
+                    continue
+            results.append({
+                'isbns':    g['isbns'],
+                'title_th': g['title_th'],
+                'title_en': g['title_en'],
+            })
+        return results
 
     def get_countries(self):
         vals = self._clean(self.intra.iloc[:, IntraCol.COUNTRY])
@@ -733,7 +823,7 @@ class ReportEngine:
                 )
         return ('', '', '', None)
 
-    def generate_all(self, period='annual', output_dir=None):
+    def generate_all(self, period='annual', output_dir=None, isbn_filter=None):
         """Generate one Excel per intra contract (may cover multiple ISBNs), bundled as ZIP."""
         if output_dir is None:
             output_dir = tempfile.mkdtemp()
@@ -786,6 +876,9 @@ class ReportEngine:
                         if not contracts[existing_idx]['country']:
                             contracts[existing_idx]['country'] = safe_str(intra_row.iloc[IntraCol.COUNTRY])
 
+        # ── ISBN filter ───────────────────────────────────────────────────────
+        isbn_set = set(isbn_filter) if isbn_filter else None
+
         # ── Iterate item file by agency ───────────────────────────────────────
         agency_series = self._clean(self.item.iloc[:, ItemCol.AGENCY])
         all_agencies  = sorted(agency_series.unique())
@@ -808,6 +901,8 @@ class ReportEngine:
 
             for isbn in sorted(isbn_series.unique()):
                 if not isbn or not re.match(r'978\d{10}', isbn):
+                    continue
+                if isbn_set and isbn not in isbn_set:
                     continue
                 contract_idx = isbn_to_contract.get(isbn)
                 if contract_idx is None:
@@ -855,6 +950,8 @@ class ReportEngine:
 
             # Orphaned ISBNs (not in any intra contract)
             for isbn in orphan_isbns:
+                if isbn_set and isbn not in isbn_set:
+                    continue
                 isbn_items = agent_items[isbn_series == isbn].copy()
                 country, publisher, intermediate_agent, contract_expiry = self._get_info_for_isbn(isbn)
 

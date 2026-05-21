@@ -169,6 +169,19 @@ def delete_dataset(dataset_id: str):
     return {"ok": True}
 
 
+@app.get("/api/datasets/{dataset_id}/books")
+def list_books(dataset_id: str, q: str = Query(default="")):
+    s = _ensure_session(dataset_id)
+    try:
+        engine = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        books  = engine.get_books(q)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"ค้นหาล้มเหลว: {e}")
+    return {"books": books[:50]}
+
+
 @app.get("/api/datasets/{dataset_id}/files/{slot}")
 def download_dataset_file(dataset_id: str, slot: str):
     if slot not in FILE_SLOTS:
@@ -191,8 +204,9 @@ def download_dataset_file(dataset_id: str, slot: str):
 # ── Generate ───────────────────────────────────────────────────────────────────
 
 class GenerateAllReq(BaseModel):
-    dataset_id: str
-    period:     str = "annual"
+    dataset_id:  str
+    period:      str       = "annual"
+    isbn_filter: list[str] = []
 
 
 @app.post("/api/generate-all")
@@ -202,7 +216,10 @@ def generate_all(req: GenerateAllReq):
     s = _ensure_session(req.dataset_id)
     try:
         engine   = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
-        zip_path = engine.generate_all(req.period, s["output_dir"])
+        zip_path = engine.generate_all(
+            req.period, s["output_dir"],
+            isbn_filter=req.isbn_filter if req.isbn_filter else None,
+        )
     except Exception as e:
         raise HTTPException(500, f"Generate ล้มเหลว: {e}")
 
