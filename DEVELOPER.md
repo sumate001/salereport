@@ -65,7 +65,7 @@ saleReport/
         ├── App.jsx            ← Root: state management, callback wiring
         ├── components/
         │   ├── UploadPanel.jsx    ← อัปโหลดไฟล์, เลือก dataset
-        │   ├── GeneratePanel.jsx  ← เลือก period, filter by book, generate
+        │   ├── GeneratePanel.jsx  ← เลือก period, filter by agent, generate
         │   ├── ResultsPanel.jsx   ← แสดงผลลัพธ์ + error cards รอบปัจจุบัน
         │   └── HistoryPanel.jsx   ← ประวัติ reports + snapshots ทั้งหมด
         └── utils/
@@ -135,13 +135,14 @@ Dataset directory layout:
 ### Generate Report
 
 ```
-POST /api/generate-all  { dataset_id, period, isbn_filter[], filter_label }
+POST /api/generate-all  { dataset_id, period, isbn_filter[], filter_label, agency_filter }
 → main.py: โหลด paths จาก dataset.json
-→ ReportEngine.generate_all(period, isbn_filter)
+→ ReportEngine.generate_all(period, isbn_filter, agency_filter)
    → อ่าน item.xlsx + intra_*.xlsx + exchange.xlsx
+   → filter by agency ถ้า agency_filter ระบุ
    → loop ทุก agency → loop ทุก ISBN/contract
    → _build_rows() → คำนวณ copies_sold, amount, royalty
-   → _write_excel() → สร้าง .xlsx ต่อ contract
+   → _write_excel() → สร้าง .xlsx ต่อ contract (พร้อม Excel formulas)
    → zip ทุกไฟล์ → return zip_path
 → copy zip → ~/.sale_report/reports/report_{ts}_{period}_{label}.zip
 → บันทึก metadata → report_{ts}_{period}_{label}.json
@@ -160,8 +161,9 @@ POST /api/generate-all  { dataset_id, period, isbn_filter[], filter_label }
 | `GET` | `/api/datasets` | List ทุก dataset |
 | `PATCH` | `/api/datasets/{id}` | แก้ชื่อ label |
 | `DELETE` | `/api/datasets/{id}` | ลบ dataset (ไฟล์ + metadata) |
-| `GET` | `/api/datasets/{id}/books?q=` | ค้นหาชื่อหนังสือ (สำหรับ filter) |
-| `GET` | `/api/datasets/{id}/files/{slot}` | Download ไฟล์ต้นฉบับ (slot: item/intra_1..4/exchange) |
+| `GET` | `/api/datasets/{id}/books?q=` | ค้นหาชื่อหนังสือ (สำหรับ filter ตามปก) |
+| `GET` | `/api/datasets/{id}/agencies?q=` | ค้นหาชื่อ Agent (สำหรับ filter ตาม agent) |
+| `GET` | `/api/datasets/{id}/files/{slot}` | Download ไฟล์ต้นฉบับ |
 
 ### Generate
 
@@ -174,24 +176,24 @@ Request body:
 {
   "dataset_id": "892f25fa-...",
   "period": "annual",
-  "isbn_filter": ["9786161856748"],
-  "filter_label": "A Dance with Dragons"
+  "isbn_filter": [],
+  "filter_label": "Discover 21, Inc.",
+  "agency_filter": "Discover 21, Inc."
 }
 ```
 `period` options: `all` · `bi1` · `bi2` · `annual`
 
 Response: `{ filename, period_label, size_bytes, ts_slug, dataset_id }`
 
-Error (400): ไม่มีข้อมูลสำหรับ period นั้น (เช่น book ไม่มีข้อมูล BI)
-Error (500): Report engine crash
-
 ### Reports
 
 | Method | Path | คำอธิบาย |
 |--------|------|----------|
-| `GET` | `/api/reports` | List ทุก report (อ่านจาก `*.json` ใน reports dir) |
+| `GET` | `/api/reports` | List ทุก report |
 | `GET` | `/api/reports/{filename}` | Download ZIP |
 | `DELETE` | `/api/reports/{filename}` | ลบ ZIP + JSON metadata |
+
+Security: ตรวจ `filename.startswith("..")` และไม่มี `/` หรือ `\` — รองรับชื่อ Agent ที่มี `..` เช่น `Discover 21, Inc.`
 
 ### Dashboard
 
@@ -207,7 +209,7 @@ Error (500): Report engine crash
 
 ## 6. Backend — Report Engine
 
-ไฟล์: `backend/report_engine.py` (~1,400 บรรทัด)
+ไฟล์: `backend/report_engine.py`
 
 ### Class หลัก: `ReportEngine`
 
@@ -215,7 +217,12 @@ Error (500): Report engine crash
 engine = ReportEngine(item_path, intra_paths, exchange_path)
 # intra_paths = list ของ 4 ไฟล์ [western_annual, asia_annual, western_bi, asia_bi]
 
-zip_path = engine.generate_all(period='annual', output_dir='/tmp/...', isbn_filter=['978...'])
+zip_path = engine.generate_all(
+    period='annual',
+    output_dir='/tmp/...',
+    isbn_filter=None,       # list ของ ISBN หรือ None = ทั้งหมด
+    agency_filter=None,     # ชื่อ agency string หรือ None = ทุก agency
+)
 ```
 
 ### Methods สำคัญ
@@ -224,8 +231,10 @@ zip_path = engine.generate_all(period='annual', output_dir='/tmp/...', isbn_filt
 |--------|----------|
 | `generate_all()` | Entry point หลัก — สร้างทุก Excel แล้ว zip |
 | `_build_rows()` | คำนวณ rows สำหรับ 1 contract/period |
-| `_write_excel()` | เขียนไฟล์ .xlsx (header + data + styling) |
+| `_write_excel()` | เขียนไฟล์ .xlsx (header + data + styling + formulas) |
 | `get_rate()` | ดึง exchange rate ตาม currency + period |
+| `get_books()` | ค้นหาหนังสือจาก Item file (grouped by canonical title) |
+| `get_agencies_from_item()` | ดึงรายชื่อ agency จาก Item file (สำหรับ agent search) |
 | `get_dashboard_data()` | Aggregate data สำหรับ dashboard |
 | `_passes_selloff()` | ตรวจ sell-off date ว่าหนังสือยังอยู่ในสัญญาหรือไม่ |
 
@@ -237,7 +246,14 @@ COPIES_SOLD (BI-H2)  = item[col41] + item[col43]   # Amarin H2 + ABook H2
 COPIES_SOLD (Annual) = item[col44]                  # Y.2025
 
 AMOUNT_THB = COPIES_SOLD × RETAIL_PRICE × ROYALTY_RATE
-AMOUNT_CCY = AMOUNT_THB ÷ EXCHANGE_RATE
+AMOUNT_CCY = AMOUNT_THB ÷ AMT_EXCHANGE_RATE         # ใช้ ADV_CURRENCY ก่อน
+```
+
+ใน Excel file จะเขียนเป็น formula:
+```
+Col 9  (AMOUNT THB) = =F{r}*G{r}*H{r}
+Col 10 (AMOUNT CCY) = =I{r}/$T$6         # T6 = exchange rate reference cell
+Col 14 (PERIOD BAL) = =L{r}-(I10+I12+...)+M{r}
 ```
 
 ### Tiered Royalty (rt1–rt5)
@@ -250,21 +266,19 @@ rt_text "a3001"    → เล่มที่ 3,001 ขึ้นไป
 rt_text "a"        → ไม่นำมาคิด (skip)
 ```
 
-ตัวอย่าง: ยอดขาย 3,500 เล่ม tier1=7% tier2=8%
-→ Row 1: 3,000 เล่ม × 7%
-→ Row 2: 500 เล่ม × 8%
-
 ### E-Book Handling
 
 - JOB ขึ้นต้นด้วย `EB/` = E-Book
-- Royalty คำนวณจาก `AMOUNT_THB` (col 81) โดยตรง ไม่ใช่ copies × price × rate
+- Amount (THB) ดึงจาก column ยอดจ่าย 2025 โดยตรง (ไม่ใช่ copies × price × rate)
+- E-book rows ไม่เขียน formula ใน col 9 — ใช้ค่าตัวเลขแทน
 - วันหมดอายุใช้ `EXP_DATE` แทน `SELL_OFF`
-- **จำนวน units sold ของ e-book ยังว่าง** — ดู `DATA_GAPS.md` ข้อ 5
 
 ### Exchange Rate
 
 - BI-Annual H1 → Q2, BI-Annual H2 → Q4, Annual → Q4
-- JPY ในไฟล์ Item ใช้ชื่อ `JPY` แต่ Exchange sheet ใช้ `JYP` (typo) — มี workaround ในโค้ดแล้ว
+- `amt_cur = adv_cur or payment_currency` — AMOUNT (CCY) ใช้ ADV currency
+- Exchange rate reference เก็บใน cell T6 ของแต่ละ Excel file
+- JPY ในไฟล์ Item ใช้ชื่อ `JPY` แต่ Exchange sheet ใช้ `JYP` — มี workaround แล้ว
 
 ---
 
@@ -272,40 +286,48 @@ rt_text "a"        → ไม่นำมาคิด (skip)
 
 ไฟล์ทุกไฟล์ใช้ `skiprows=2` (header อยู่ row 3)
 
-### Item Sheet (`ยอดขาย-ลิขสิทธิ์.xlsx`)
+### Item Sheet (`ยอดขาย-ลิขสิทธิ์.xlsx`) — format ปัจจุบัน (ไม่มี "test" col)
 
 | Index | ชื่อ column | ใช้เป็น |
 |-------|-------------|---------|
 | 1 | Item number | JOB |
 | 2 | End date of receive | DATE PRINTED |
 | 3 | Name (Thai) | TITLE TH |
-| 9 | Price | RETAIL PRICE |
-| 12 | ISBN | ISBN |
-| 15 | Name (Eng) | TITLE EN |
-| 16 | Agency | key สำหรับ group ต่อ agency |
-| 18 | Annual/Bi-Annual | แยก BI / Annual |
-| 19 | Job qty แจ้งเมืองนอก | NO. OF COPIES PRINTED |
-| 33 | Rate Royalty | ROYALTY RATE |
-| 34 | ADV | ADVANCED PAYMENT |
-| 35 | ADV Currency | สกุลเงิน advance |
-| 36 | Payment Currency | สกุลเงิน royalty |
-| 40 | ขาย H1.2025 (AMARIN) | BI-H1 Amarin channel |
-| 41 | ขาย H2.2025 (AMARIN) | BI-H2 Amarin channel |
-| 42 | ขาย H1.2025 (A-Book) | BI-H1 ABook channel |
-| 43 | ขาย H2.2025 (A-Book) | BI-H2 ABook channel |
-| 44 | ขาย Y.2025 | Annual copies sold |
-| 72 | ยอดจ่าย 2024 | PREVIOUS BALANCE |
-| 73 | สถานะ 2024 | "จ่ายแล้ว" → ใช้ col 72 |
-| 81 | ยอดจ่าย 2025 | E-Book royalty amount |
+| 8 | Price | RETAIL PRICE |
+| 11 | ISBN | ISBN |
+| 14 | Name (Eng) | TITLE EN |
+| 15 | Agency | key สำหรับ group ต่อ agency |
+| 17 | Annual/Bi-Annual | แยก BI / Annual |
+| 18 | Job qty แจ้งเมืองนอก | NO. OF COPIES PRINTED |
+| 32 | Rate Royalty | ROYALTY RATE |
+| 33 | ADV | ADVANCED PAYMENT |
+| 34 | ADV Currency | สกุลเงิน advance + AMOUNT (CCY) |
+| 35 | Payment Currency | สกุลเงิน royalty (fallback) |
+| 39 | ขาย H1.2025 (AMARIN) | BI-H1 Amarin channel |
+| 40 | ขาย H2.2025 (AMARIN) | BI-H2 Amarin channel |
+| 41 | ขาย H1.2025 (A-Book) | BI-H1 ABook channel |
+| 42 | ขาย H2.2025 (A-Book) | BI-H2 ABook channel |
+| 43 | ขาย Y.2025 | Annual copies sold |
+| 71 | ยอดจ่าย 2024 | PREVIOUS BALANCE |
+| 72 | สถานะ 2024 | "จ่ายแล้ว" → BALANCE PAID = col 71 |
+| 74 | ยอดจ่าย 2025.1 | E-Book H1 net receipt |
+| 75 | สถานะ 2025.1 | Pay status BI-H1 |
+| 77 | ยอดจ่าย 2025.2 | E-Book H2 net receipt |
+| 78 | สถานะ 2025.2 | Pay status BI-H2 |
+| 80 | ยอดจ่าย 2025 | E-Book Annual net receipt |
+| 81 | สถานะ 2025 | Pay status Annual |
+| 84 | Stock คงเหลือ บัญชี | STOCK ACCOUNT |
 
-### Intra Sheet (4 ไฟล์)
+> **ถ้าพบไฟล์ Item รูปแบบเก่า** (มี "test" column ที่ position 6) ทุก index ตั้งแต่ 5 ขึ้นไปจะต่างกัน 1 — ดู git history ก่อน v0.45
+
+### Intra Sheet (4 ไฟล์, skiprows=3)
 
 | Index | ชื่อ column | ใช้เป็น |
 |-------|-------------|---------|
-| 3 | Publisher / Intermediate Agent | PUBLISHER / AGENT (text รวม) |
-| 5 | Paidtype | Annual / Bi-Annual |
-| 6 | Agent (รับ report) | agency label |
-| 10 | Country | COUNTRY |
+| 1 | Paidtype | Annual / Bi-Annual |
+| 2 | Agent (รับ report) | agency label |
+| 5 | Publisher | PUBLISHER |
+| 6 | Country | COUNTRY |
 | 31 | วันหมดอายุ | EXP_DATE (e-book) |
 | 32 | SellOffPeriod | SELL_OFF (print book) |
 | 56–70 | rt1_text … rt5_price | Tiered royalty tiers |
@@ -332,8 +354,9 @@ App.jsx
 │
 ├── GeneratePanel
 │   ├── เลือก period (checkbox: bi1, bi2, annual)
-│   ├── ค้นหาหนังสือ (debounce search → GET /api/datasets/{id}/books)
-│   ├── เลือกหลายเล่ม → generate แยกต่อเล่ม (1 job per book per period)
+│   ├── ค้นหา Agent (search → GET /api/datasets/{id}/agencies)
+│   ├── เลือก 1 Agent → generate report เฉพาะ agent นั้น
+│   │   ถ้าไม่เลือก → generate ทุก agent
 │   └── callbacks: onGenerationStart, onReportGenerated, onReportError, onDashboardGenerated
 │
 ├── ResultsPanel
@@ -344,7 +367,7 @@ App.jsx
 └── HistoryPanel  (key={historyKey} → remount เพื่อ refetch)
     ├── fetch GET /api/reports + GET /api/snapshots
     ├── group by dataset_id
-    ├── แสดง filter_label badge สำหรับ report ที่ filter ตามหนังสือ
+    ├── แสดง filter_label badge (ชื่อ Agent) สำหรับ report ที่ filter
     └── ลบ report / snapshot / dataset
 ```
 
@@ -352,7 +375,7 @@ App.jsx
 
 - `historyKey` — increment เพื่อ force remount HistoryPanel (refetch จาก server)
 - `onGenerationStart()` — clear `currentReports`, `currentErrors`, `currentDashboard` ก่อนเริ่ม job ใหม่
-- การ generate หลาย jobs ใช้ sequential loop (ไม่ parallel) เพื่อแสดง progress ทีละขั้น
+- การ generate หลาย periods ใช้ sequential loop — แสดง progress ทีละขั้น
 
 ### Report Filename Convention
 
@@ -361,8 +384,15 @@ report_{YYYYMMDD}_{HHMMSS}_{period}_{label_slug}.zip
 report_{YYYYMMDD}_{HHMMSS}_{period}_{label_slug}.json   ← metadata
 ```
 
-`label_slug` = filter_label ที่ sanitize แล้ว (ตัดอักขระ `\/:*?"<>|` ออก)  
+`label_slug` = filter_label ที่ sanitize แล้ว (ตัดอักขระ `\/:*?"<>|` ออก, max 60 chars)  
 ถ้าไม่มี filter → ไม่มี label_slug ต่อท้าย
+
+### Excel Path Length Limit (Windows)
+
+ชื่อ folder/file ถูก truncate เพื่อไม่ให้ path รวมเกิน 260 chars (Windows MAX_PATH):
+- Agency folder: max 40 chars
+- Publisher folder: max 40 chars
+- Book filename: max 100 chars
 
 ---
 
@@ -377,14 +407,11 @@ report_{YYYYMMDD}_{HHMMSS}_{period}_{label_slug}.json   ← metadata
 | 3 | Exchange Rate มีแค่ Q2/Q4 | Q1/Q3 ว่าง — ใช้ไม่ได้ |
 | 4 | ปี hardcode เป็น 2025 | ปี 2026 จะพังทันที — ดูหัวข้อ 10 |
 | 5 | E-Book units sold ไม่มีใน dataset | Copies Sold ของ e-book แสดงว่าง |
-| 6 | Balance Paid ไม่มี column แยก | ใช้ workaround STATUS_2024 = "จ่ายแล้ว" |
-| 10 | ISBN เดียวมีหลาย row ใน Intra | ใช้ heuristic เลือก primary row (อาจผิดพลาด) |
+| 6 | Balance Paid ไม่มี column แยก | ใช้ workaround STATUS col = "จ่ายแล้ว" |
 
 ---
 
 ## 10. Hardcoded Values ที่ต้องแก้ก่อนปี 2026
-
-จุดทั้งหมดที่ hardcode ปี 2025 — ถ้าไม่แก้จะได้ผลลัพธ์ผิดตั้งแต่ dataset ปี 2026 เป็นต้นไป:
 
 ### `report_engine.py`
 
@@ -394,21 +421,21 @@ def report_year_from_period(period: str) -> int:
     return 2025  # ← แก้ให้รับ year parameter หรือ detect จาก dataset
 
 # 2. Column indices ใน Exchange Rate sheet
-# ปี 2025 อยู่ที่ Q2=col30, Q4=col32
-# ปี 2026 จะเลื่อนไป 4 column → Q2=col34, Q4=col36 (ขึ้นอยู่กับ format ไฟล์)
-quarter = {'bi1': 'Q2', 'bi2': 'Q4', 'annual': 'Q4'}.get(period, 'Q4')
-# ตรวจสอบ logic หาปีใน get_rate()
+# ปี 2025: Q2=col30, Q4=col32
+# ปี 2026: จะเลื่อนไป 4 column → ต้องตรวจสอบ
 
-# 3. Header ใน Excel output
+# 3. Header ใน Excel output (ค้นหา "2025" เพื่อหาทุก occurrence)
 "ANNUAL 2025 (January – December 2025)"
 "For the Period Ended December 31, 2025"
-# ค้นหา "2025" ใน report_engine.py เพื่อหาทุก occurrence
+
+# 4. ItemCol: STATUS_BI1/BI2/ANNUAL และ EB_NET_BI1/BI2/ANNUAL
+# columns เหล่านี้ถูก hardcode ตาม layout ปี 2025
+# ถ้า dataset ปี 2026 มี column ใหม่เพิ่ม → ต้องอัปเดต
 ```
 
 ### `frontend/src/components/GeneratePanel.jsx`
 
 ```javascript
-// Period labels hardcode ปี 2025
 const PERIODS = [
   { id: 'bi1',    label: 'BI-Annual 2025.1', sub: 'ม.ค. – มิ.ย.' },
   { id: 'bi2',    label: 'BI-Annual 2025.2', sub: 'ก.ค. – ธ.ค.' },
@@ -419,7 +446,6 @@ const PERIODS = [
 ### `backend/main.py`
 
 ```python
-# PERIOD_LABELS dictionary
 PERIOD_LABELS = {
     'bi1':    'BI-Annual 2025.1  (ม.ค. – มิ.ย.)',
     'bi2':    'BI-Annual 2025.2  (ก.ค. – ธ.ค.)',
@@ -434,7 +460,7 @@ PERIOD_LABELS = {
 
 ## 11. How to Extend
 
-### เพิ่ม period ใหม่ (เช่น quarterly)
+### เพิ่ม period ใหม่
 
 1. `backend/main.py` → เพิ่มใน `PERIOD_LABELS` และ validate ใน `generate_all()`
 2. `backend/report_engine.py` → เพิ่ม logic ใน `_build_rows()` และ `get_rate()`
@@ -442,7 +468,7 @@ PERIOD_LABELS = {
 
 ### เพิ่ม input file slot ใหม่
 
-1. `backend/main.py` → เพิ่มใน `POST /api/datasets` (multipart field) และ `dataset.json`
+1. `backend/main.py` → เพิ่มใน `POST /api/datasets` และ `dataset.json`
 2. `backend/report_engine.py` → รับ path ใหม่ใน `__init__`
 3. `frontend/src/components/HistoryPanel.jsx` → เพิ่มใน `FILE_SLOTS`
 4. `frontend/src/components/UploadPanel.jsx` → เพิ่ม file input
@@ -457,13 +483,11 @@ PERIOD_LABELS = {
 ทั้งหมดอยู่ใน `_write_excel()` ใน `report_engine.py`  
 ใช้ `openpyxl` — reference: https://openpyxl.readthedocs.io
 
-### แก้ปัญหา "Unknow" currency (DATA_GAPS #1)
+### เพิ่ม Excel formula column ใหม่
 
-เพิ่ม fallback ใน `get_rate()`:
-```python
-if currency in ('Unknow', '', None):
-    currency = 'THB'  # หรือ default ที่ business กำหนด
-```
+1. เพิ่ม tracking ใน `write_section()` (เหมือน `pb_row` / `amount_rows`)
+2. เขียน formula string แทน value: `ws.cell(...).value = f'=A{r}+B{r}'`
+3. ตั้ง `number_format` ที่ cell เดียวกัน
 
 ---
 
@@ -471,11 +495,12 @@ if currency in ('Unknow', '', None):
 
 | Version | รายละเอียด |
 |---------|----------|
-| v0.44 | Generate แยกต่อเล่ม (per-book jobs), error cards ใน ResultsPanel, filter_label ใน history badge, detect empty ZIP |
-| v0.43 | ชื่อ ZIP รวม book title เมื่อ filter, filter ตาม book title (search UI) |
+| v0.45 | Agent search filter (GET /agencies endpoint), ItemCol ใหม่ (ไม่มี test col), Excel formula cells (col 9,10,14), col 18 จ่ายค่าลิขสิทธิ์, security fix ชื่อไฟล์ที่มี ".." |
+| v0.44 | Generate แยกต่อเล่ม (per-book jobs), error cards ใน ResultsPanel, filter_label badge ใน history |
+| v0.43 | ชื่อ ZIP รวม book title เมื่อ filter, book title search UI |
 | v0.42 | ชื่อไฟล์ Excel รวม EN+TH title |
 | v0.41 | Filter report ตามชื่อหนังสือ |
 | v0.40 | Report layout ตรงกับ reference 2023 |
 | v0.37 | Web UI (React), dataset management, history panel |
-| v0.25 | Tiered royalty (rt1–rt5), title TH+EN, AMOUNT header แสดง currency |
+| v0.25 | Tiered royalty (rt1–rt5), title TH+EN |
 | v1.0 | Initial CLI release |
