@@ -17,27 +17,30 @@ class ItemCol:
     JOB              = 1
     DATE_PRINTED     = 2
     TITLE_TH         = 3
-    PRICE            = 9
-    ISBN             = 12
-    TITLE_EN         = 15
-    AGENCY           = 16
-    ANNUAL_BI        = 18
-    COPIES_PRINTED   = 19
-    ROYALTY_RATE     = 33
-    ADV              = 34
-    ADV_CURRENCY     = 35
-    PAYMENT_CURRENCY = 36
-    BI_H1_AMARIN     = 40
-    BI_H2_AMARIN     = 41
-    BI_H1_ABOOK      = 42
-    BI_H2_ABOOK      = 43
-    ANNUAL_SOLD      = 44
-    PREV_BALANCE     = 72
-    STATUS_2024      = 73
-    STOCK_ACCOUNT    = 79
-    EB_NET_BI1       = 75   # ยอดจ่าย 2025.1  (e-book H1 net receipt)
-    EB_NET_BI2       = 78   # ยอดจ่าย 2025.2  (e-book H2 net receipt)
-    EB_NET_ANNUAL    = 81   # ยอดจ่าย 2025    (e-book annual net receipt)
+    PRICE            = 8
+    ISBN             = 11
+    TITLE_EN         = 14
+    AGENCY           = 15
+    ANNUAL_BI        = 17
+    COPIES_PRINTED   = 18
+    ROYALTY_RATE     = 32
+    ADV              = 33
+    ADV_CURRENCY     = 34
+    PAYMENT_CURRENCY = 35
+    BI_H1_AMARIN     = 39
+    BI_H2_AMARIN     = 40
+    BI_H1_ABOOK      = 41
+    BI_H2_ABOOK      = 42
+    ANNUAL_SOLD      = 43
+    PREV_BALANCE     = 71
+    STATUS_2024      = 72   # สถานะ 2024 (Annual) — ใช้ตรวจ balance_paid ปีก่อน
+    STOCK_ACCOUNT    = 84
+    EB_NET_BI1       = 74   # ยอดจ่าย 2025.1  (e-book H1 net receipt)
+    EB_NET_BI2       = 77   # ยอดจ่าย 2025.2  (e-book H2 net receipt)
+    EB_NET_ANNUAL    = 80   # ยอดจ่าย 2025    (e-book annual net receipt)
+    STATUS_BI1       = 75   # สถานะ 2025.1
+    STATUS_BI2       = 78   # สถานะ 2025.2
+    STATUS_ANNUAL    = 81   # สถานะ 2025
 
 
 class IntraCol:
@@ -371,6 +374,18 @@ class ReportEngine:
         vals = self._clean(df.iloc[:, IntraCol.AGENT])
         return sorted([v for v in vals.unique() if v and v.lower() != 'nan' and len(v) > 3])
 
+    def get_agencies_from_item(self, q: str = '') -> list:
+        """Return sorted list of agency names from the item file, optionally filtered by query."""
+        q_lower = q.lower().strip()
+        agency_series = self._clean(self.item.iloc[:, ItemCol.AGENCY])
+        agencies = sorted([
+            a for a in agency_series.unique()
+            if a and len(a) > 2 and a.lower() != 'nan'
+        ])
+        if q_lower:
+            agencies = [a for a in agencies if q_lower in a.lower()]
+        return agencies
+
     def get_publishers(self, agency, country=''):
         df = self.intra
         df = df[self._clean(df.iloc[:, IntraCol.AGENT]) == agency]
@@ -487,11 +502,15 @@ class ReportEngine:
             currency      = safe_str(first_r.iloc[ItemCol.PAYMENT_CURRENCY]) or 'USD'
             adv           = safe_float(first_r.iloc[ItemCol.ADV])
             adv_cur       = safe_str(first_r.iloc[ItemCol.ADV_CURRENCY])
+            amt_cur       = adv_cur or currency
             status_2024   = safe_str(first_r.iloc[ItemCol.STATUS_2024])
             prev_balance  = safe_float(first_r.iloc[ItemCol.PREV_BALANCE])
-            balance_paid  = safe_float(first_r.iloc[ItemCol.PREV_BALANCE]) if status_2024 == 'จ่ายแล้ว' else 0.0
+            balance_paid  = abs(safe_float(first_r.iloc[ItemCol.PREV_BALANCE])) if status_2024 == 'จ่ายแล้ว' else 0.0
+            _status_col   = {'bi1': ItemCol.STATUS_BI1, 'bi2': ItemCol.STATUS_BI2}.get(period, ItemCol.STATUS_ANNUAL)
+            pay_status    = safe_str(first_r.iloc[_status_col])
             stock_account = safe_float(first_r.iloc[ItemCol.STOCK_ACCOUNT])
             ex_rate       = self.get_rate(currency, period)
+            amt_ex_rate   = self.get_rate(amt_cur, period) if amt_cur != currency else ex_rate
             intra_row     = self._find_intra_row(first_r)
             tiers         = parse_rt_tiers(intra_row)
             # If item file has no rate but intra tiers do, use first tier rate as fallback
@@ -588,8 +607,8 @@ class ReportEngine:
             #  • Run in a single tier with sold > 0 → one print_run_tier row (with calc)
             #  • Run straddling ≥2 tiers            → one print_run_tier row per portion
             # Advance / balance always go to the very first row (first run, first tier).
+            any_prt_row = False   # any print_run_tier row created
             if multiple_runs:
-                any_prt_row = False   # any print_run_tier row created
 
                 for idx, (r, run_sold) in enumerate(run_data):
                     is_first_run = (idx == 0)
@@ -612,6 +631,11 @@ class ReportEngine:
                         want_adv = is_first_run and not adv_placed
                         if want_adv:
                             adv_placed = True
+                        _run_rate    = (portions[0][2] if portions else fallback_rate) or 0.0
+                        _run_amt_thb = run_sold * retail * _run_rate if run_sold > 0 else 0.0
+                        if run_sold > 0:
+                            any_prt_row = True
+                        _run_amt_ccy = _run_amt_thb / amt_ex_rate if (amt_ex_rate and _run_amt_thb) else 0.0
                         rows.append({
                             'row_type':       'print_run',
                             'job':            safe_str(r.iloc[ItemCol.JOB]),  # every row
@@ -622,10 +646,11 @@ class ReportEngine:
                             'date_printed':   date_str,
                             'copies_sold':    run_sold,
                             'retail_price':   retail or None,
-                            'royalty_rate':   (portions[0][2] if portions else fallback_rate) or None,
-                            'amount_thb':     0.0,
-                            'amount_ccy':     0.0,
+                            'royalty_rate':   _run_rate or None,
+                            'amount_thb':     _run_amt_thb,
+                            'amount_ccy':     _run_amt_ccy,
                             'currency':       currency,
+                            'amt_currency':   amt_cur,
                             'adv':            adv           if want_adv else None,
                             'adv_currency':   adv_cur,
                             'prev_balance':   prev_balance  if want_adv else None,
@@ -633,6 +658,7 @@ class ReportEngine:
                             'period_balance': period_balance if want_adv else None,
                             'unsold_copies':  unsold_copies  if want_adv else None,
                             'stock_account':  stock_account  if want_adv else None,
+                            'status_2024':    pay_status if want_adv else None,
                             'is_ebook':       is_ebook,
                             'ex_rate':        ex_rate,
                         })
@@ -661,8 +687,9 @@ class ReportEngine:
                             'royalty_rate':   t_rate,
                             'copies_sold':    p_sold,
                             'amount_thb':     amt_thb,
-                            'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
+                            'amount_ccy':     amt_thb / amt_ex_rate if amt_ex_rate else 0.0,
                             'currency':       currency,
+                            'amt_currency':   amt_cur,
                             'adv':            adv           if want_adv else 0.0,
                             'adv_currency':   adv_cur,
                             'prev_balance':   prev_balance  if want_adv else 0.0,
@@ -670,6 +697,7 @@ class ReportEngine:
                             'period_balance': period_balance if want_adv else None,
                             'unsold_copies':  unsold_copies  if want_adv else None,
                             'stock_account':  stock_account  if want_adv else None,
+                            'status_2024':    pay_status if want_adv else None,
                             'is_ebook':       is_ebook,
                             'ex_rate':        ex_rate,
                         })
@@ -677,7 +705,7 @@ class ReportEngine:
             # ── Tier rows ────────────────────────────────────────────────────────
             # Skip when print_run_tier rows already carry all calculation amounts.
             job_first       = safe_str(first_r.iloc[ItemCol.JOB])
-            has_inline_calc = multiple_runs and any_prt_row
+            has_inline_calc = any_prt_row
 
             def make_tier_row(tc, tr, is_first_tier, want_adv=False):
                 amt_thb = eb_net if is_ebook else tc * retail * tr
@@ -696,8 +724,9 @@ class ReportEngine:
                     'retail_price':   None if is_ebook else retail,
                     'royalty_rate':   tr,
                     'amount_thb':     amt_thb,
-                    'amount_ccy':     amt_thb / ex_rate if ex_rate else 0.0,
+                    'amount_ccy':     amt_thb / amt_ex_rate if amt_ex_rate else 0.0,
                     'currency':       currency,
+                    'amt_currency':   amt_cur,
                     'adv':            adv           if want_adv else 0.0,
                     'adv_currency':   adv_cur,
                     'prev_balance':   prev_balance  if want_adv else 0.0,
@@ -705,6 +734,7 @@ class ReportEngine:
                     'period_balance': period_balance if want_adv else None,
                     'unsold_copies':  unsold_copies  if want_adv else None,
                     'stock_account':  stock_account  if want_adv else None,
+                    'status_2024':    pay_status if want_adv else None,
                     'is_ebook':       is_ebook,
                     'ex_rate':        ex_rate,
                 }
@@ -725,20 +755,18 @@ class ReportEngine:
             # Blank separator row between ISBN groups (matches sample layout)
             rows.append({'row_type': 'blank'})
 
-        # Contract-level period balance = Previous Balance (ccy) − Σ AMOUNT (ccy)
+        # Contract-level period balance = Previous Balance − Σ AMOUNT(THB) + Balance Paid
         # Placed once on the first non-blank row; covers all ISBNs in this contract.
-        # Previous balance (col 72) stored in THB — convert to payment currency via ex_rate.
-        total_amount_ccy = sum(
-            (row.get('amount_ccy') or 0.0)
+        total_amount_thb = sum(
+            (row.get('amount_thb') or 0.0)
             for row in rows
             if row.get('row_type') != 'blank'
         )
         first_data = next((r for r in rows if r.get('row_type') != 'blank'), None)
         if first_data is not None:
-            ex = first_data.get('ex_rate') or 1.0
-            raw_prev = first_data.get('prev_balance') or 0.0
-            prev_ccy = raw_prev / ex if ex else raw_prev
-            contract_pb = (prev_ccy - total_amount_ccy) if (prev_ccy != 0 or total_amount_ccy > 0) else None
+            raw_prev    = first_data.get('prev_balance') or 0.0
+            raw_paid    = first_data.get('balance_paid') or 0.0
+            contract_pb = (raw_prev - total_amount_thb + raw_paid) if (raw_prev != 0 or total_amount_thb > 0) else None
             pb_placed = False
             for row in rows:
                 if row.get('row_type') == 'blank':
@@ -823,7 +851,7 @@ class ReportEngine:
                 )
         return ('', '', '', None)
 
-    def generate_all(self, period='annual', output_dir=None, isbn_filter=None):
+    def generate_all(self, period='annual', output_dir=None, isbn_filter=None, agency_filter=None):
         """Generate one Excel per intra contract (may cover multiple ISBNs), bundled as ZIP."""
         if output_dir is None:
             output_dir = tempfile.mkdtemp()
@@ -882,6 +910,8 @@ class ReportEngine:
         # ── Iterate item file by agency ───────────────────────────────────────
         agency_series = self._clean(self.item.iloc[:, ItemCol.AGENCY])
         all_agencies  = sorted(agency_series.unique())
+        if agency_filter:
+            all_agencies = [a for a in all_agencies if a == agency_filter]
 
         # Write xlsx to an isolated temp dir so old period files don't leak into this ZIP
         xlsx_tmp = tempfile.mkdtemp()
@@ -892,7 +922,7 @@ class ReportEngine:
                 continue
 
             agency_label = agency_raw if len(agency_raw) > 3 else 'Direct Publisher'
-            safe_agency  = re.sub(r'[\\/:*?"<>|]', '_', agency_label)
+            safe_agency  = re.sub(r'[\\/:*?"<>|]', '_', agency_label)[:40]
             agency_dir   = os.path.join(xlsx_tmp, safe_agency)
 
             isbn_series = self._clean(agent_items.iloc[:, ItemCol.ISBN])
@@ -917,7 +947,7 @@ class ReportEngine:
                 # Collect item rows for ALL ISBNs in this contract (current agency)
                 contract_items = agent_items[isbn_series.isin(all_isbns)].copy()
 
-                safe_pub = re.sub(r'[\\/:*?"<>|]', '_', c['publisher'] or 'Unknown Publisher')
+                safe_pub = re.sub(r'[\\/:*?"<>|]', '_', c['publisher'] or 'Unknown Publisher')[:40]
                 pub_dir  = os.path.join(agency_dir, safe_pub)
                 os.makedirs(pub_dir, exist_ok=True)
 
@@ -942,7 +972,7 @@ class ReportEngine:
                 # exclude values that look like agency names (end with ";")
                 _en_clean   = '' if _en_raw.endswith(';') else _en_raw
                 _label      = f"{_en_clean} - {_th_clean}" if _en_clean else _th_clean
-                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{all_isbns[0]} - {_label}")[:180]
+                safe_name   = re.sub(r'[\\/:*?"<>|]', '_', f"{all_isbns[0]} - {_label}")[:100]
 
                 self._write_excel(
                     os.path.join(pub_dir, f"{safe_name}.xlsx"),
@@ -977,7 +1007,7 @@ class ReportEngine:
                 _en_raw   = strip_reprint_suffix(safe_str(_row0.iloc[ItemCol.TITLE_EN]))
                 _en_clean = '' if _en_raw.endswith(';') else _en_raw
                 _label    = f"{_en_clean} - {_th_clean}" if _en_clean else _th_clean
-                safe_name = re.sub(r'[\\/:*?"<>|]', '_', f"{isbn} - {_label}")[:180]
+                safe_name = re.sub(r'[\\/:*?"<>|]', '_', f"{isbn} - {_label}")[:100]
                 self._write_excel(
                     os.path.join(pub_dir, f"{safe_name}.xlsx"),
                     country, agency_label, publisher, intermediate_agent, contract_expiry, period,
@@ -1210,16 +1240,18 @@ class ReportEngine:
 
         # ── Rows 7-9: column headers ──────────────────────────────────────────
         all_rows_combined = bi1_rows + bi2_rows + an_rows
-        raw_ccy = next((r['currency'] for r in all_rows_combined if r.get('currency')), 'CCY')
-        ccy_label = 'JPY' if raw_ccy == 'JYP' else raw_ccy
+        raw_ccy     = next((r['currency']     for r in all_rows_combined if r.get('currency')),     'CCY')
+        raw_amt_ccy = next((r['amt_currency'] for r in all_rows_combined if r.get('amt_currency')), raw_ccy)
+        ccy_label     = 'JPY' if raw_ccy     == 'JYP' else raw_ccy
+        amt_ccy_label = 'JPY' if raw_amt_ccy == 'JYP' else raw_amt_ccy
 
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
-             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF'],
+             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF',  'จ่าย'],
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
-             '(THB)',   f'({ccy_label})',  'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ', 'Stock (เล่ม)'],
+             '(THB)',   f'({amt_ccy_label})', 'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ',    'Stock (เล่ม)', 'ค่าลิขสิทธิ์'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
-             '', '', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', 'COPIES', 'Account', 'คงเหลือ Account'],
+             '', '', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', 'COPIES', 'Account', 'คงเหลือ Account', ''],
         ]
         for hdr in hdr_rows:
             for c_idx, val in enumerate(hdr, 1):
@@ -1233,15 +1265,6 @@ class ReportEngine:
             nonlocal row
             if not rows_data:
                 return
-
-            # Section label row
-            ws.cell(row=row, column=1, value=label).font = f(9, bold=True)
-            ws.cell(row=row, column=1).fill = SEC_FILL
-            ws.cell(row=row, column=1).alignment = lft
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=17)
-            for c in range(1, 18):
-                ws.cell(row=row, column=c).border = bdr
-            row += 1
 
             total_thb = 0.0
             total_ccy = 0.0
@@ -1268,8 +1291,8 @@ class ReportEngine:
                     put(6, d['retail_price'] or None,   NUM)
                     put(7, d['royalty_rate'] or None,   PCT)
                     put(8, d['copies_sold'] or None,    NUM)
-                    put(9,  None, NUM)
-                    put(10, None)
+                    put(9,  d['amount_thb'] or None,    NUM)
+                    put(10, d['amount_ccy'] or None,    NUM)
                     put(11, d['adv']          if d['adv'] is not None else None, NUM)
                     put(12, d['prev_balance'] if d['prev_balance'] is not None else None, NUM)
                     put(13, d['balance_paid'] if d['balance_paid'] is not None else None, NUM)
@@ -1278,6 +1301,10 @@ class ReportEngine:
                     put(16, d['stock_account'] if d['stock_account'] is not None else None, NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
                     put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
+                    _st = d.get('status_2024')
+                    put(18, (_st if _st else '-') if d['adv'] is not None else None, align=ctr)
+                    total_thb   += d['amount_thb'] or 0.0
+                    total_ccy   += d['amount_ccy'] or 0.0
                     ex_rate_used = d['ex_rate']
                     ccy_used     = d['currency']
                 elif d['row_type'] == 'print_run_tier':
@@ -1300,6 +1327,8 @@ class ReportEngine:
                     put(16, d['stock_account'] or None,  NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
                     put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
+                    _st = d.get('status_2024')
+                    put(18, (_st if _st else '-') if d.get('status_2024') is not None else None, align=ctr)
                     total_thb   += d['amount_thb']
                     total_ccy   += d['amount_ccy']
                     ex_rate_used = d['ex_rate']
@@ -1323,6 +1352,8 @@ class ReportEngine:
                     put(16, d['stock_account']  or None,       NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
                     put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
+                    _st = d.get('status_2024')
+                    put(18, (_st if _st else '-') if _st is not None else None, align=ctr)
 
                     total_thb   += d['amount_thb']
                     total_ccy   += d['amount_ccy']
@@ -1333,7 +1364,7 @@ class ReportEngine:
 
                 if d.get('title_th'):
                     put(3, d['title_th'], align=lft)
-                    for c in range(1, 18):
+                    for c in range(1, 19):
                         if c != 3:
                             ws.cell(row=row, column=c).border = bdr
                     row += 1
@@ -1343,17 +1374,6 @@ class ReportEngine:
                 ws.cell(row=row, column=7, value='of net Receipt').font = f(8)
                 row += 1
 
-            # Total row
-            for c in range(1, 18):
-                ws.cell(row=row, column=c).border = bdr
-            ws.cell(row=row, column=8, value='TOTAL').font = f(9, bold=True)
-            ws.cell(row=row, column=8).alignment = rgt
-            for col, val in ((9, total_thb), (10, total_ccy)):
-                cell = ws.cell(row=row, column=col, value=val)
-                cell.font = f(9, bold=True)
-                cell.number_format = NUM
-                cell.alignment = rgt
-            row += 1
 
             # Exchange rate note
             if ex_rate_used and ccy_used:
@@ -1384,7 +1404,7 @@ class ReportEngine:
 
         # ── Column widths ─────────────────────────────────────────────────────
         for i, w in enumerate(
-            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10, 13, 13], 1
+            [12, 16, 42, 11, 13, 10, 9, 9, 13, 13, 13, 13, 13, 13, 10, 13, 13, 12], 1
         ):
             ws.column_dimensions[get_column_letter(i)].width = w
 

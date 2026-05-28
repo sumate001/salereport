@@ -182,6 +182,19 @@ def list_books(dataset_id: str, q: str = Query(default="")):
     return {"books": books[:50]}
 
 
+@app.get("/api/datasets/{dataset_id}/agencies")
+def list_agencies(dataset_id: str, q: str = Query(default="")):
+    s = _ensure_session(dataset_id)
+    try:
+        engine   = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        agencies = engine.get_agencies_from_item(q)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"ค้นหา agent ล้มเหลว: {e}")
+    return {"agencies": agencies[:50]}
+
+
 @app.get("/api/datasets/{dataset_id}/files/{slot}")
 def download_dataset_file(dataset_id: str, slot: str):
     if slot not in FILE_SLOTS:
@@ -204,10 +217,11 @@ def download_dataset_file(dataset_id: str, slot: str):
 # ── Generate ───────────────────────────────────────────────────────────────────
 
 class GenerateAllReq(BaseModel):
-    dataset_id:   str
-    period:       str       = "annual"
-    isbn_filter:  list[str] = []
-    filter_label: str       = ""
+    dataset_id:    str
+    period:        str       = "annual"
+    isbn_filter:   list[str] = []
+    filter_label:  str       = ""
+    agency_filter: str       = ""
 
 
 @app.post("/api/generate-all")
@@ -220,6 +234,7 @@ def generate_all(req: GenerateAllReq):
         zip_path = engine.generate_all(
             req.period, s["output_dir"],
             isbn_filter=req.isbn_filter if req.isbn_filter else None,
+            agency_filter=req.agency_filter or None,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -289,7 +304,7 @@ def list_reports():
 
 @app.get("/api/reports/{filename}")
 def download_report(filename: str):
-    if not filename.endswith(".zip") or "/" in filename or ".." in filename:
+    if not filename.endswith(".zip") or "/" in filename or "\\" in filename or filename.startswith(".."):
         raise HTTPException(403, "Access denied")
     path = REPORTS_DIR / filename
     if not path.exists():
@@ -299,7 +314,7 @@ def download_report(filename: str):
 
 @app.delete("/api/reports/{filename}")
 def delete_report(filename: str):
-    if not filename.endswith(".zip") or "/" in filename or ".." in filename:
+    if not filename.endswith(".zip") or "/" in filename or "\\" in filename or filename.startswith(".."):
         raise HTTPException(403, "Access denied")
     (REPORTS_DIR / filename).unlink(missing_ok=True)
     # Try exact-match JSON first (new naming: includes label_slug)
@@ -353,7 +368,7 @@ def list_snapshots():
 
 @app.get("/api/snapshots/{filename}")
 def get_snapshot(filename: str):
-    if not filename.endswith(".html") or "/" in filename or ".." in filename:
+    if not filename.endswith(".html") or "/" in filename or "\\" in filename or filename.startswith(".."):
         raise HTTPException(403, "Access denied")
     path = SNAPSHOTS_DIR / filename
     if not path.exists():
@@ -363,7 +378,7 @@ def get_snapshot(filename: str):
 
 @app.delete("/api/snapshots/{filename}")
 def delete_snapshot(filename: str):
-    if not filename.endswith(".html") or "/" in filename or ".." in filename:
+    if not filename.endswith(".html") or "/" in filename or "\\" in filename or filename.startswith(".."):
         raise HTTPException(403, "Access denied")
     (SNAPSHOTS_DIR / filename).unlink(missing_ok=True)
     (SNAPSHOTS_DIR / filename.replace(".html", ".json")).unlink(missing_ok=True)
