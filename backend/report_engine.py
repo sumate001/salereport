@@ -651,6 +651,7 @@ class ReportEngine:
                             'amount_ccy':     _run_amt_ccy,
                             'currency':       currency,
                             'amt_currency':   amt_cur,
+                            'amt_ex_rate':    amt_ex_rate,
                             'adv':            adv           if want_adv else None,
                             'adv_currency':   adv_cur,
                             'prev_balance':   prev_balance  if want_adv else None,
@@ -690,6 +691,7 @@ class ReportEngine:
                             'amount_ccy':     amt_thb / amt_ex_rate if amt_ex_rate else 0.0,
                             'currency':       currency,
                             'amt_currency':   amt_cur,
+                            'amt_ex_rate':    amt_ex_rate,
                             'adv':            adv           if want_adv else 0.0,
                             'adv_currency':   adv_cur,
                             'prev_balance':   prev_balance  if want_adv else 0.0,
@@ -727,6 +729,7 @@ class ReportEngine:
                     'amount_ccy':     amt_thb / amt_ex_rate if amt_ex_rate else 0.0,
                     'currency':       currency,
                     'amt_currency':   amt_cur,
+                    'amt_ex_rate':    amt_ex_rate,
                     'adv':            adv           if want_adv else 0.0,
                     'adv_currency':   adv_cur,
                     'prev_balance':   prev_balance  if want_adv else 0.0,
@@ -1245,6 +1248,13 @@ class ReportEngine:
         ccy_label     = 'JPY' if raw_ccy     == 'JYP' else raw_ccy
         amt_ccy_label = 'JPY' if raw_amt_ccy == 'JYP' else raw_amt_ccy
 
+        # Exchange rate reference cell (T6) — used by col 10 formula =I{r}/$T$6
+        _rate_val = next((r['amt_ex_rate'] for r in all_rows_combined if r.get('amt_ex_rate')), 1.0)
+        _rate_cell = ws.cell(row=6, column=20, value=_rate_val)
+        _rate_cell.number_format = '0.0000'
+        _rate_cell.font = f(7, color='AAAAAA')
+        RATE_REF = '$T$6'
+
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
              'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF',  'จ่าย'],
@@ -1261,8 +1271,11 @@ class ReportEngine:
             row += 1
 
         # ── Section writer ────────────────────────────────────────────────────
+        pb_row        = None   # Excel row where PERIOD BALANCE lives
+        amount_rows   = []     # Excel rows that carry amount_thb (for SUM formula)
+
         def write_section(label, rows_data, sub_period):
-            nonlocal row
+            nonlocal row, pb_row, amount_rows
             if not rows_data:
                 return
 
@@ -1282,6 +1295,27 @@ class ReportEngine:
                     row += 1
                     continue
 
+                # ── helpers shared by all row types ──────────────────────────
+                r = row  # snapshot: row number for formulas
+                use_formula = bool(d.get('copies_sold')) and not d.get('is_ebook')
+
+                def _put_amounts():
+                    if use_formula:
+                        put(9,  f'=F{r}*G{r}*H{r}',      NUM)
+                        put(10, f'=I{r}/{RATE_REF}',      NUM)
+                        amount_rows.append(r)
+                    else:
+                        put(9,  d['amount_thb'] or None,  NUM)
+                        put(10, d['amount_ccy'] or None,  NUM)
+                        if d.get('amount_thb'):
+                            amount_rows.append(r)
+
+                def _track_pb():
+                    nonlocal pb_row
+                    if d.get('period_balance') is not None and pb_row is None:
+                        pb_row = r
+                    put(14, None, NUM)   # placeholder — filled after all sections
+
                 if d['row_type'] == 'print_run':
                     put(1, d['job'],                    align=lft)
                     put(2, d['isbn'] or None,           align=lft)
@@ -1291,12 +1325,11 @@ class ReportEngine:
                     put(6, d['retail_price'] or None,   NUM)
                     put(7, d['royalty_rate'] or None,   PCT)
                     put(8, d['copies_sold'] or None,    NUM)
-                    put(9,  d['amount_thb'] or None,    NUM)
-                    put(10, d['amount_ccy'] or None,    NUM)
+                    _put_amounts()
                     put(11, d['adv']          if d['adv'] is not None else None, NUM)
                     put(12, d['prev_balance'] if d['prev_balance'] is not None else None, NUM)
                     put(13, d['balance_paid'] if d['balance_paid'] is not None else None, NUM)
-                    put(14, d['period_balance'], NUM)
+                    _track_pb()
                     put(15, d['unsold_copies'], NUM)
                     put(16, d['stock_account'] if d['stock_account'] is not None else None, NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
@@ -1308,7 +1341,6 @@ class ReportEngine:
                     ex_rate_used = d['ex_rate']
                     ccy_used     = d['currency']
                 elif d['row_type'] == 'print_run_tier':
-                    # Hybrid row: shows print context (cols 1-5) + full calculation
                     put(1, d['job'],          align=lft)
                     put(2, d['isbn'] or None, align=lft)
                     put(3, d['title'],        align=lft)
@@ -1317,12 +1349,11 @@ class ReportEngine:
                     put(6, d['retail_price']  or None,   NUM)
                     put(7, d['royalty_rate']  or None,   PCT)
                     put(8, d['copies_sold']   or None,   NUM)
-                    put(9, d['amount_thb']    or None,   NUM)
-                    put(10, d['amount_ccy']   or None,   NUM)
+                    _put_amounts()
                     put(11, d['adv']          or None,   NUM)
                     put(12, d['prev_balance'] or None,   NUM)
                     put(13, d['balance_paid'] or None,   NUM)
-                    put(14, d['period_balance'],          NUM)
+                    _track_pb()
                     put(15, d['unsold_copies'],           NUM)
                     put(16, d['stock_account'] or None,  NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
@@ -1342,19 +1373,17 @@ class ReportEngine:
                     put(6,  d['retail_price']   or None,       NUM)
                     put(7,  d['royalty_rate']   or None,       PCT)
                     put(8,  d['copies_sold']    or None,       NUM)
-                    put(9,  d['amount_thb']     or None,       NUM)
-                    put(10, d['amount_ccy']     or None,       NUM)
+                    _put_amounts()
                     put(11, d['adv']            or None,       NUM)
                     put(12, d['prev_balance']   or None,       NUM)
                     put(13, d['balance_paid']   or None,       NUM)
-                    put(14, d['period_balance'],               NUM)
+                    _track_pb()
                     put(15, d['unsold_copies'],                NUM)
                     put(16, d['stock_account']  or None,       NUM)
                     _stock = d.get('stock_account'); _unsold = d.get('unsold_copies')
                     put(17, (_stock - _unsold) if (_stock is not None and _unsold is not None) else None, NUM)
                     _st = d.get('status_2024')
                     put(18, (_st if _st else '-') if _st is not None else None, align=ctr)
-
                     total_thb   += d['amount_thb']
                     total_ccy   += d['amount_ccy']
                     ex_rate_used = d['ex_rate']
@@ -1401,6 +1430,21 @@ class ReportEngine:
         write_section('BI-ANNUAL 2025.1  (January – June 2025)',      bi1_rows, 'bi1')
         write_section('BI-ANNUAL 2025.2  (July – December 2025)',     bi2_rows, 'bi2')
         write_section('ANNUAL 2025  (January – December 2025)',        an_rows,  'annual')
+
+        # ── Col 14: PERIOD BALANCE formula ────────────────────────────────────
+        # Written after all sections so the SUM covers every amount row.
+        if pb_row is not None:
+            cell14 = ws.cell(row=pb_row, column=14)
+            cell14.number_format = '#,##0.00'
+            cell14.font = Font(name='Arial', size=9)
+            cell14.border = Border(left=Side(style='thin'), right=Side(style='thin'),
+                                   top=Side(style='thin'),  bottom=Side(style='thin'))
+            cell14.alignment = Alignment(horizontal='right', vertical='center')
+            if amount_rows:
+                sum_parts = '+'.join(f'I{r}' for r in amount_rows)
+                cell14.value = f'=L{pb_row}-({sum_parts})+M{pb_row}'
+            else:
+                cell14.value = f'=L{pb_row}+M{pb_row}'
 
         # ── Column widths ─────────────────────────────────────────────────────
         for i, w in enumerate(
