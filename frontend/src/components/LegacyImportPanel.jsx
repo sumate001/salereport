@@ -105,6 +105,30 @@ export default function LegacyImportPanel() {
     finally { setBusy(false) }
   }
 
+  const handleRetry = async (errorPaths, prevOutputDir) => {
+    setStatus('running')
+    setResult(null)
+    setErrorMsg('')
+    setProgress({ pct: 0, message: `Retry ${errorPaths.length} ไฟล์...`, current: 0, total: errorPaths.length, books_out: 0 })
+    try {
+      const r = await fetch('/api/legacy/convert', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          source_path:  '',
+          output_path:  prevOutputDir || outputPath.trim(),
+          retry_paths:  errorPaths,
+        }),
+      })
+      const d = await r.json()
+      if (!r.ok) { setErrorMsg(d.detail || 'เกิดข้อผิดพลาด'); setStatus('error'); return }
+      setJobId(d.job_id)
+      startPolling(d.job_id)
+    } catch (e) {
+      setErrorMsg(String(e)); setStatus('error')
+    }
+  }
+
   const handleDelete = async (filename) => {
     if (!window.confirm(`ลบ ${filename}?`)) return
     await fetch(`/api/legacy/reports/${filename}`, { method: 'DELETE' })
@@ -250,16 +274,30 @@ export default function LegacyImportPanel() {
           </a>
 
           {result.errors?.length > 0 && (
-            <details className="text-xs text-amber-700">
-              <summary className="cursor-pointer font-medium">
-                ⚠️ มีข้อผิดพลาด {result.errors.length} ไฟล์ (คลิกดูรายละเอียด)
-              </summary>
-              <ul className="mt-2 space-y-0.5 max-h-40 overflow-y-auto">
-                {result.errors.map(([f, e], i) => (
-                  <li key={i} className="font-mono">• {f}: {e}</li>
-                ))}
-              </ul>
-            </details>
+            <div className="border border-amber-200 rounded-lg p-3 space-y-2 bg-amber-50">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-amber-800">
+                  ⚠️ ล้มเหลว {result.errors.length} ไฟล์
+                </p>
+                {result.error_paths?.length > 0 && (
+                  <button
+                    onClick={() => handleRetry(result.error_paths, result.output_dir)}
+                    className="px-3 py-1 rounded bg-amber-600 hover:bg-amber-700
+                               text-white text-xs font-medium transition-colors"
+                  >
+                    🔄 Retry ไฟล์ที่ล้มเหลว
+                  </button>
+                )}
+              </div>
+              <details className="text-xs text-amber-700">
+                <summary className="cursor-pointer">คลิกดูรายละเอียด</summary>
+                <ul className="mt-2 space-y-0.5 max-h-32 overflow-y-auto">
+                  {result.errors.map(([f, e], i) => (
+                    <li key={i} className="font-mono">• {f}: {e}</li>
+                  ))}
+                </ul>
+              </details>
+            </div>
           )}
         </div>
       )}
@@ -274,12 +312,20 @@ export default function LegacyImportPanel() {
                    className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100 text-sm">
                 <div className="space-y-0.5 min-w-0 flex-1 mr-3">
                   <p className="text-gray-500 text-xs">{fmt_ts(item.ts_slug)}</p>
-                  <p className="text-gray-800 font-medium">
-                    📦 {item.total_books} หนังสือ จาก {item.total_files} ไฟล์
-                    {item.errors?.length > 0 && (
-                      <span className="ml-2 text-amber-600 text-xs">({item.errors.length} errors)</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-gray-800 font-medium">
+                      📦 {item.total_books} หนังสือ จาก {item.total_files} ไฟล์
+                    </p>
+                    {item.errors?.length > 0 && item.error_paths?.length > 0 && (
+                      <button
+                        onClick={() => handleRetry(item.error_paths, item.output_dir)}
+                        className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600
+                                   text-white text-xs font-medium"
+                      >
+                        🔄 Retry {item.errors.length} errors
+                      </button>
                     )}
-                  </p>
+                  </div>
                   <p className="text-gray-400 text-xs">{fmt_size(item.size_bytes)}</p>
                 </div>
                 <div className="flex gap-2 flex-shrink-0">

@@ -60,7 +60,11 @@ def _read_rows(path: Path):
     if ext == '.xls':
         if not HAS_XLRD:
             raise RuntimeError("ต้องติดตั้ง xlrd: pip install xlrd")
-        wb = xlrd.open_workbook(str(path))
+        try:
+            wb = xlrd.open_workbook(str(path))
+        except AssertionError:
+            # SST corruption — ลอง ignore
+            wb = xlrd.open_workbook(str(path), ignore_workbook_corruption=True)
         ws = wb.sheet_by_index(0)
         return [[ws.cell_value(r, c) for c in range(ws.ncols)]
                 for r in range(ws.nrows)]
@@ -660,6 +664,75 @@ def _safe(text: str, max_len: int = 60) -> str:
 
 # ── Folder converter ──────────────────────────────────────────────────────────
 
+def convert_specific_files(file_paths: list, output_dir: str,
+                            progress_cb=None) -> tuple:
+    """แปลงเฉพาะไฟล์ที่ระบุ (ใช้สำหรับ retry)"""
+    xlsx_tmp = tempfile.mkdtemp()
+    stats = {'total_files': 0, 'total_books': 0, 'errors': [], 'error_paths': []}
+    total = len(file_paths)
+
+    if progress_cb:
+        progress_cb(0, total, f'Retry {total} ไฟล์...')
+
+    for idx, fpath_str in enumerate(file_paths):
+        fpath = Path(fpath_str)
+        if not fpath.exists():
+            stats['errors'].append((fpath.name, 'ไม่พบไฟล์'))
+            stats['error_paths'].append(fpath_str)
+            continue
+
+        stats['total_files'] += 1
+        agent_folder = fpath.parent.name
+
+        if progress_cb:
+            progress_cb(idx + 1, total, f'({idx+1}/{total}) {fpath.name}',
+                        books_out=stats['total_books'])
+        try:
+            books = parse_legacy_file(fpath, agent_folder)
+        except Exception as e:
+            stats['errors'].append((fpath.name, str(e)))
+            stats['error_paths'].append(fpath_str)
+            continue
+
+        for book in books:
+            if not book.get('title_en') and not book.get('title_th'):
+                continue
+            year         = book.get('year', 2024)
+            period_code  = book.get('period_code', 'annual')
+            agency_name  = book.get('agency', agent_folder) or agent_folder
+            publisher    = book.get('publisher', 'Unknown')
+            title_en     = _safe(book.get('title_en', ''), 50)
+            title_th     = _safe(book.get('title_th', ''), 30)
+            title_label  = f"{title_en} - {title_th}" if title_en and title_th else (title_en or title_th)
+            out_dir      = Path(xlsx_tmp) / str(year) / _safe(agency_name, 40) / _safe(publisher, 40)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            period_suffix = {'annual': 'Annual', 'bi1': 'BI-H1', 'bi2': 'BI-H2'}.get(period_code, period_code)
+            base_fname = f"{_safe(title_label, 80)}_{period_suffix}"
+            fname = f"{base_fname}.xlsx"
+            counter = 2
+            while (out_dir / fname).exists():
+                fname = f"{base_fname}_{counter}.xlsx"
+                counter += 1
+            try:
+                write_legacy_excel(str(out_dir / fname), book)
+                stats['total_books'] += 1
+            except Exception as e:
+                stats['errors'].append((fpath.name + ' > ' + title_label, str(e)))
+
+    if progress_cb:
+        progress_cb(total, total, f'กำลัง zip {stats["total_books"]} ไฟล์...')
+
+    zip_path = os.path.join(output_dir, 'legacy_retry.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _dirs, files in os.walk(xlsx_tmp):
+            for fname in files:
+                if fname.endswith('.xlsx'):
+                    fp = os.path.join(root, fname)
+                    zf.write(fp, os.path.relpath(fp, xlsx_tmp))
+    shutil.rmtree(xlsx_tmp, ignore_errors=True)
+    return zip_path, stats
+
+
 def convert_datasale_folder(source_dir: str, output_dir: str,
                              progress_cb=None) -> tuple:
     """
@@ -671,7 +744,7 @@ def convert_datasale_folder(source_dir: str, output_dir: str,
     source = Path(source_dir)
     xlsx_tmp = tempfile.mkdtemp()
 
-    stats = {'total_files': 0, 'total_books': 0, 'errors': []}
+    stats = {'total_files': 0, 'total_books': 0, 'errors': [], 'error_paths': []}
 
     all_files = [f for f in sorted(source.rglob('*.xls*'))
                  if not f.name.startswith('~')]
@@ -696,6 +769,7 @@ def convert_datasale_folder(source_dir: str, output_dir: str,
             books = parse_legacy_file(fpath, agent_folder)
         except Exception as e:
             stats['errors'].append((fpath.name, str(e)))
+            stats['error_paths'].append(str(fpath))
             continue
 
         for book in books:

@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from report_engine import ReportEngine
-from legacy_converter import convert_datasale_folder
+from legacy_converter import convert_datasale_folder, convert_specific_files
 
 # ── Persistent storage ─────────────────────────────────────────────────────────
 HOME          = Path.home() / ".sale_report"
@@ -383,8 +383,9 @@ def get_snapshot(filename: str):
 # ── Legacy Import ──────────────────────────────────────────────────────────────
 
 class LegacyConvertReq(BaseModel):
-    source_path: str = ""   # ถ้าว่าง → ใช้ DataSale ใน project
-    output_path: str = ""   # folder ที่จะบันทึก ZIP (ถ้าว่าง → ~/.sale_report/legacy_reports/)
+    source_path: str = ""        # ถ้าว่าง → ใช้ DataSale ใน project
+    output_path: str = ""        # folder ที่จะบันทึก ZIP
+    retry_paths: list[str] = []  # ถ้าระบุ → แปลงเฉพาะไฟล์พวกนี้
 
 DEFAULT_DATASALE = str(Path(__file__).parent.parent / "DataSale")
 
@@ -395,7 +396,8 @@ LEGACY_DIR.mkdir(parents=True, exist_ok=True)
 LEGACY_JOBS: dict[str, dict] = {}
 
 
-def _run_legacy_job(job_id: str, source: str, output_path: str = ""):
+def _run_legacy_job(job_id: str, source: str, output_path: str = "",
+                    retry_paths: list = None):
     """รันใน background thread"""
     job = LEGACY_JOBS[job_id]
     tmp_out = tempfile.mkdtemp()
@@ -408,8 +410,12 @@ def _run_legacy_job(job_id: str, source: str, output_path: str = ""):
         job["books_out"] = books_out
 
     try:
-        zip_path, stats = convert_datasale_folder(source, tmp_out,
-                                                   progress_cb=on_progress)
+        if retry_paths:
+            zip_path, stats = convert_specific_files(retry_paths, tmp_out,
+                                                      progress_cb=on_progress)
+        else:
+            zip_path, stats = convert_datasale_folder(source, tmp_out,
+                                                       progress_cb=on_progress)
     except Exception as e:
         shutil.rmtree(tmp_out, ignore_errors=True)
         job["status"]  = "error"
@@ -442,9 +448,10 @@ def _run_legacy_job(job_id: str, source: str, output_path: str = ""):
         "total_files": stats["total_files"],
         "total_books": stats["total_books"],
         "errors":      stats["errors"][:50],
+        "error_paths": stats.get("error_paths", []),
         "source_path": source,
         "output_dir":  str(dest_dir),
-        "output_path": str(dest),    # full path ของ ZIP
+        "output_path": str(dest),
     }
 
     # บันทึก metadata ใน LEGACY_DIR เสมอ (สำหรับ history)
@@ -509,7 +516,11 @@ def legacy_convert(req: LegacyConvertReq):
         except Exception as e:
             raise HTTPException(400, f"output path ไม่ถูกต้อง: {e}")
 
-    t = threading.Thread(target=_run_legacy_job, args=(job_id, source, output_path), daemon=True)
+    t = threading.Thread(
+        target=_run_legacy_job,
+        args=(job_id, source, output_path, req.retry_paths or None),
+        daemon=True
+    )
     t.start()
     return {"job_id": job_id}
 
