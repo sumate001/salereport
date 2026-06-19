@@ -6,6 +6,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +15,7 @@ from pydantic import BaseModel
 
 from report_engine import ReportEngine
 from legacy_converter import convert_datasale_folder, convert_specific_files
+from history_merger import merge_report_with_history
 
 # ── Persistent storage ─────────────────────────────────────────────────────────
 HOME          = Path.home() / ".sale_report"
@@ -389,8 +391,8 @@ class LegacyConvertReq(BaseModel):
 
 DEFAULT_DATASALE = str(Path(__file__).parent.parent / "DataSale")
 
-LEGACY_DIR = HOME / "legacy_reports"
-LEGACY_DIR.mkdir(parents=True, exist_ok=True)
+LEGACY_DIR  = HOME / "legacy_reports";  LEGACY_DIR.mkdir(parents=True, exist_ok=True)
+MERGED_DIR  = HOME / "merged_reports";  MERGED_DIR.mkdir(parents=True, exist_ok=True)
 
 # in-memory job store  {job_id: {...}}
 LEGACY_JOBS: dict[str, dict] = {}
@@ -560,6 +562,82 @@ def delete_legacy_report(filename: str):
         raise HTTPException(403, "Access denied")
     (LEGACY_DIR / filename).unlink(missing_ok=True)
     (LEGACY_DIR / filename.replace(".zip", ".json")).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ── Merge history ──────────────────────────────────────────────────────────────
+
+class MergeHistoryReq(BaseModel):
+    report_zip: str
+    legacy_zip: Optional[str] = None  # ถ้า None → ใช้ latest
+
+
+@app.post("/api/merge-history")
+def merge_history(req: MergeHistoryReq):
+    # validate report_zip
+    if not req.report_zip.endswith(".zip") or "/" in req.report_zip or "\\" in req.report_zip:
+        raise HTTPException(400, "report_zip ไม่ถูกต้อง")
+    rep_path = REPORTS_DIR / req.report_zip
+    if not rep_path.exists():
+        raise HTTPException(404, f"ไม่พบไฟล์ {req.report_zip}")
+
+    # resolve legacy_zip
+    if req.legacy_zip:
+        if not req.legacy_zip.endswith(".zip") or "/" in req.legacy_zip or "\\" in req.legacy_zip:
+            raise HTTPException(400, "legacy_zip ไม่ถูกต้อง")
+        leg_path = LEGACY_DIR / req.legacy_zip
+    else:
+        zips = sorted(LEGACY_DIR.glob("legacy_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not zips:
+            raise HTTPException(404, "ยังไม่มีไฟล์ข้อมูลย้อนหลัง — กรุณาแปลงข้อมูลย้อนหลังก่อน")
+        leg_path = zips[0]
+
+    if not leg_path.exists():
+        raise HTTPException(404, f"ไม่พบไฟล์ {leg_path.name}")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = req.report_zip.replace(".zip", "").replace("report_", "")
+    out_name = f"merged_{base}_{ts}.zip"
+    out_path = MERGED_DIR / out_name
+
+    try:
+        stats = merge_report_with_history(rep_path, leg_path, out_path)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+    return {
+        "filename":  out_name,
+        "legacy_zip": leg_path.name,
+        "matched":   stats["matched"],
+        "unmatched": stats["unmatched"],
+        "total":     stats["total"],
+        "size_bytes": out_path.stat().st_size,
+    }
+
+
+@app.get("/api/merged-reports")
+def list_merged_reports():
+    items = []
+    for f in sorted(MERGED_DIR.glob("merged_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
+        items.append({"filename": f.name, "size_bytes": f.stat().st_size})
+    return {"reports": items}
+
+
+@app.get("/api/merged-reports/{filename}")
+def download_merged_report(filename: str):
+    if not filename.endswith(".zip") or "/" in filename or "\\" in filename:
+        raise HTTPException(403, "Access denied")
+    path = MERGED_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "ไม่พบไฟล์")
+    return FileResponse(path, media_type="application/zip", filename=filename)
+
+
+@app.delete("/api/merged-reports/{filename}")
+def delete_merged_report(filename: str):
+    if not filename.endswith(".zip") or "/" in filename or "\\" in filename:
+        raise HTTPException(403, "Access denied")
+    (MERGED_DIR / filename).unlink(missing_ok=True)
     return {"ok": True}
 
 

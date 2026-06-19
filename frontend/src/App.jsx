@@ -4,6 +4,7 @@ import GeneratePanel    from './components/GeneratePanel'
 import ResultsPanel     from './components/ResultsPanel'
 import HistoryPanel     from './components/HistoryPanel'
 import LegacyImportPanel from './components/LegacyImportPanel'
+import MergePanel       from './components/MergePanel'
 
 export default function App() {
   const [activeTab,        setActiveTab]        = useState('report')  // 'report' | 'legacy'
@@ -115,7 +116,7 @@ export default function App() {
         {/* ── Tab: สร้าง Report (เดิม) ── */}
         {activeTab === 'report' && (
           <>
-            <div className="grid gap-4" style={{ gridTemplateColumns: '260px 1fr 1.5fr', alignItems: 'start' }}>
+            <div className="grid gap-4" style={{ gridTemplateColumns: '260px 1fr 1fr 1fr', alignItems: 'start' }}>
               <UploadPanel
                 datasets={datasets}
                 activeDataset={activeDataset}
@@ -136,6 +137,7 @@ export default function App() {
                 errors={currentErrors}
                 dashboard={currentDashboard}
               />
+              <MergePanel latestReports={currentReports} />
             </div>
             <HistoryPanel
               key={historyKey}

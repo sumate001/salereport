@@ -19,6 +19,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -54,26 +55,34 @@ def _sf(v) -> Optional[float]:
         return None
 
 
-def _read_rows(path: Path):
-    """Read XLS or XLSX → list of list of values"""
+def _read_rows(path: Path, timeout: int = 30):
+    """Read XLS or XLSX → list of list of values (with timeout to skip hanging files)"""
     ext = path.suffix.lower()
-    if ext == '.xls':
-        if not HAS_XLRD:
-            raise RuntimeError("ต้องติดตั้ง xlrd: pip install xlrd")
+
+    def _do_read():
+        if ext == '.xls':
+            if not HAS_XLRD:
+                raise RuntimeError("ต้องติดตั้ง xlrd: pip install xlrd")
+            try:
+                wb = xlrd.open_workbook(str(path))
+            except AssertionError:
+                wb = xlrd.open_workbook(str(path), ignore_workbook_corruption=True)
+            ws = wb.sheet_by_index(0)
+            return [[ws.cell_value(r, c) for c in range(ws.ncols)]
+                    for r in range(ws.nrows)]
+        else:
+            wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+            ws = wb.active
+            rows = [[cell.value for cell in row] for row in ws.iter_rows()]
+            wb.close()
+            return rows
+
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_do_read)
         try:
-            wb = xlrd.open_workbook(str(path))
-        except AssertionError:
-            # SST corruption — ลอง ignore
-            wb = xlrd.open_workbook(str(path), ignore_workbook_corruption=True)
-        ws = wb.sheet_by_index(0)
-        return [[ws.cell_value(r, c) for c in range(ws.ncols)]
-                for r in range(ws.nrows)]
-    else:
-        wb = openpyxl.load_workbook(str(path), data_only=True)
-        ws = wb.active
-        return [[ws.cell(r, c).value
-                 for c in range(1, ws.max_column + 1)]
-                for r in range(1, ws.max_row + 1)]
+            return future.result(timeout=timeout)
+        except FuturesTimeout:
+            raise RuntimeError(f"อ่านไฟล์ timeout ({timeout}s): {path.name}")
 
 
 _SECTION_HEADERS = {
@@ -520,19 +529,21 @@ def write_legacy_excel(path: str, book: dict):
     ws = wb.active
     ws.title = 'Sales Report'
 
-    thin = Side(style='thin')
-    bdr  = Border(left=thin, right=thin, top=thin, bottom=thin)
-    ctr  = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    lft  = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-    rgt  = Alignment(horizontal='right',  vertical='center')
-    NUM  = '#,##0.00'
-    PCT  = '0.00%'
+    thin    = Side(style='thin')
+    no_side = Side(style=None)
+    bdr     = Border(left=thin, right=thin, top=thin, bottom=thin)
+    ctr     = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    lft     = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    rgt     = Alignment(horizontal='right',  vertical='center')
+    NUM     = '#,##0.00'
+    PCT     = '0.00%'
+    TABLE_COLS = 18
 
-    def f(sz=9, bold=False, color='000000'):
-        return Font(name='Arial', size=sz, bold=bold, color=color)
+    def f(sz=10, bold=False, color='000000'):
+        return Font(name='Cambria', size=sz, bold=bold, color=color)
 
-    HDR_FILL = PatternFill('solid', fgColor='1F4E79')
-    HDR_FONT = Font(name='Arial', size=9, bold=True, color='FFFFFF')
+    HDR_FILL = PatternFill('solid', fgColor='E0FFFF')
+    HDR_FONT = Font(name='Cambria', size=10, bold=True, color='000000')
 
     year        = book.get('year', 2024)
     period_code = book.get('period_code', 'annual')
@@ -549,7 +560,11 @@ def write_legacy_excel(path: str, book: dict):
         _period_end_str(period_code, year),
     ]
     for i, txt in enumerate(header_lines, 1):
-        ws.cell(row=i, column=3, value=txt).font = f(10, bold=(i <= 2))
+        ws.merge_cells(start_row=i, start_column=3, end_row=i, end_column=TABLE_COLS)
+        cell = ws.cell(row=i, column=3, value=txt)
+        cell.font = Font(name='Cambria', size=16, bold=True, color='FF0000' if i == 6 else '000000')
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+        ws.row_dimensions[i].height = 22
 
     # exchange rate reference cell T6
     ex_rate  = book.get('ex_rate') or 1.0
@@ -573,17 +588,33 @@ def write_legacy_excel(path: str, book: dict):
          'COPIES', 'Account', 'คงเหลือ Account', ''],
     ]
     row_num = 7
-    for hdr in hdr_rows:
+    hdr_start_row = 7
+    for hdr_idx, hdr in enumerate(hdr_rows):
+        is_top    = hdr_idx == 0
+        is_bottom = hdr_idx == 2
         for c_idx, val in enumerate(hdr, 1):
             cell = ws.cell(row=row_num, column=c_idx, value=val)
-            cell.font = HDR_FONT; cell.fill = HDR_FILL
-            cell.alignment = ctr; cell.border = bdr
+            cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.alignment = ctr
+            cell.border = Border(
+                left=thin, right=thin,
+                top=thin if is_top else no_side,
+                bottom=thin if is_bottom else no_side,
+            )
+        ws.row_dimensions[row_num].height = 15
         row_num += 1
+
+    # Merge A7:A9 (JOB) และ B7:B9 (ISBN)
+    for col, label in [(1, 'JOB'), (2, 'ISBN')]:
+        ws.merge_cells(start_row=hdr_start_row, start_column=col,
+                       end_row=hdr_start_row + 2, end_column=col)
+        cell = ws.cell(row=hdr_start_row, column=col, value=label)
+        cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.alignment = ctr
+        cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     # ── Data row ──────────────────────────────────────────────────────────────
     def put(col, val, fmt=None, align=rgt):
         cell = ws.cell(row=row_num, column=col, value=val)
-        cell.font = f(9); cell.border = bdr; cell.alignment = align
+        cell.font = f(10); cell.border = bdr; cell.alignment = align
         if fmt:
             cell.number_format = fmt
 

@@ -1187,19 +1187,21 @@ class ReportEngine:
         ws = wb.active
         ws.title = 'Sales Report'
 
-        thin = Side(style='thin')
-        bdr  = Border(left=thin, right=thin, top=thin, bottom=thin)
-        ctr  = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        lft  = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-        rgt  = Alignment(horizontal='right',  vertical='center')
-        NUM  = '#,##0.00'
-        PCT  = '0.00%'
+        thin     = Side(style='thin')
+        no_side  = Side(style=None)
+        bdr      = Border(left=thin, right=thin, top=thin, bottom=thin)
+        ctr      = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        lft      = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+        rgt      = Alignment(horizontal='right',  vertical='center')
+        NUM      = '#,##0.00'
+        PCT      = '0.00%'
+        TABLE_COLS = 18   # table ends at col R (จ่าย ค่าลิขสิทธิ์)
 
-        def f(sz=9, bold=False, color='000000'):
-            return Font(name='Arial', size=sz, bold=bold, color=color)
+        def f(sz=10, bold=False, color='000000'):
+            return Font(name='Cambria', size=sz, bold=bold, color=color)
 
-        HDR_FILL = PatternFill('solid', fgColor='1F4E79')
-        HDR_FONT = Font(name='Arial', size=9, bold=True, color='FFFFFF')
+        HDR_FILL = PatternFill('solid', fgColor='E0FFFF')
+        HDR_FONT = Font(name='Cambria', size=10, bold=True, color='000000')
         SEC_FILL = PatternFill('solid', fgColor='D6E4F0')
 
         type_mark = {
@@ -1238,7 +1240,12 @@ class ReportEngine:
         for txt in ['SALES REPORT', 'Amarin Corporations PCL',
                     agency, licensor_line,
                     type_mark, period_end]:
-            ws.cell(row=row, column=3, value=txt).font = f(10, bold=(row <= 2))
+            ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=TABLE_COLS)
+            cell = ws.cell(row=row, column=3, value=txt)
+            is_red = (row == 6)
+            cell.font = Font(name='Cambria', size=16, bold=True, color='FF0000' if is_red else '000000')
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            ws.row_dimensions[row].height = 22
             row += 1
 
         # ── Rows 7-9: column headers ──────────────────────────────────────────
@@ -1257,18 +1264,34 @@ class ReportEngine:
 
         hdr_rows = [
             ['', '', 'TITLE', 'NO.OF',   'DATE',    'RETAIL',  'ROYALTY', 'NO.OF',
-             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF',  'จ่าย'],
+             'AMOUNT',  'AMOUNT',          'ADVANCED', 'PREVIOUS', 'BALANCE', 'PERIOD', 'NO.OF',  'Stock (เล่ม)', 'DIF',           'จ่าย'],
             ['', '', '',      'COPIES',  'PRINTED', 'PRICE',   'RATE',    'COPIES',
-             '(THB)',   f'({amt_ccy_label})', 'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ',    'Stock (เล่ม)', 'ค่าลิขสิทธิ์'],
+             '(THB)',   f'({amt_ccy_label})', 'PAYMENT',  'BALANCE',  'PAID',    'BALANCE', 'UNSOLD', 'คงเหลือ',       'Stock (เล่ม)',   'ค่าลิขสิทธิ์'],
             ['JOB', 'ISBN', '', 'PRINTED', '', '(THB)', '', 'SOLD',
-             '', '', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', 'COPIES', 'Account', 'คงเหลือ Account', ''],
+             '', '', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', f'({ccy_label})', 'COPIES', 'Account',       'คงเหลือ Account', ''],
         ]
-        for hdr in hdr_rows:
+        hdr_start_row = row
+        for hdr_idx, hdr in enumerate(hdr_rows):
+            is_top    = hdr_idx == 0
+            is_bottom = hdr_idx == 2
             for c_idx, val in enumerate(hdr, 1):
                 cell = ws.cell(row=row, column=c_idx, value=val)
-                cell.font = HDR_FONT; cell.fill = HDR_FILL
-                cell.alignment = ctr; cell.border = bdr
+                cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.alignment = ctr
+                cell.border = Border(
+                    left=thin, right=thin,
+                    top=thin if is_top else no_side,
+                    bottom=thin if is_bottom else no_side,
+                )
+            ws.row_dimensions[row].height = 15
             row += 1
+
+        # Merge A7:A9 (JOB) and B7:B9 (ISBN)
+        for col, label in [(1, 'JOB'), (2, 'ISBN')]:
+            ws.merge_cells(start_row=hdr_start_row, start_column=col,
+                           end_row=hdr_start_row + 2, end_column=col)
+            cell = ws.cell(row=hdr_start_row, column=col, value=label)
+            cell.font = HDR_FONT; cell.fill = HDR_FILL; cell.alignment = ctr
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
         # ── Section writer ────────────────────────────────────────────────────
         pb_row        = None   # Excel row where PERIOD BALANCE lives
@@ -1436,7 +1459,7 @@ class ReportEngine:
         if pb_row is not None:
             cell14 = ws.cell(row=pb_row, column=14)
             cell14.number_format = '#,##0.00'
-            cell14.font = Font(name='Arial', size=9)
+            cell14.font = Font(name='Cambria', size=10)
             cell14.border = Border(left=Side(style='thin'), right=Side(style='thin'),
                                    top=Side(style='thin'),  bottom=Side(style='thin'))
             cell14.alignment = Alignment(horizontal='right', vertical='center')
