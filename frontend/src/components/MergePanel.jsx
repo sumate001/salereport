@@ -183,6 +183,17 @@ export default function MergePanel({ latestReports = [] }) {
               >
                 ดาวน์โหลด
               </a>
+              <button
+                onClick={async () => {
+                  await fetch(`/api/merged-reports/${encodeURIComponent(m.filename)}`, { method: 'DELETE' })
+                  setMergedHistory(prev => prev.filter(x => x.filename !== m.filename))
+                  if (result?.filename === m.filename) setResult(null)
+                }}
+                className="shrink-0 text-gray-300 hover:text-red-500 transition-colors"
+                title="ลบ"
+              >
+                ✕
+              </button>
             </div>
           ))}
         </div>
