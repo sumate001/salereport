@@ -22,6 +22,8 @@ export default function MergePanel({ latestReports = [] }) {
   const [result,         setResult]         = useState(null)
   const [error,          setError]          = useState('')
   const [mergedHistory,  setMergedHistory]  = useState([])
+  const [archiving,      setArchiving]      = useState(false)
+  const [archiveMsg,     setArchiveMsg]     = useState('')
 
   useEffect(() => {
     fetch('/api/legacy/reports')
@@ -71,6 +73,37 @@ export default function MergePanel({ latestReports = [] }) {
     }
   }
 
+  // report ปีปัจจุบันจะกลายเป็นข้อมูลย้อนหลังของปีถัดไป — ปุ่มนี้แปลงโครงสร้างชื่อไฟล์
+  // แล้วรวมเข้ากับ legacy pack ล่าสุด เพื่อไม่ให้ปีนั้นหายไปตอน merge ครั้งหน้า
+  const handleArchive = async () => {
+    if (!selectedReport || archiving) return
+    const rep = latestReports.find(r => r.filename === selectedReport)
+    const guessYear = Number((rep?.period_label || '').match(/20\d\d/)?.[0])
+      || new Date().getFullYear()
+    const year = window.prompt(
+      'เก็บ report นี้เป็นข้อมูลย้อนหลังของปีไหน?', String(guessYear))
+    if (!year) return
+    setArchiving(true)
+    setArchiveMsg('')
+    setError('')
+    try {
+      const r = await fetch('/api/legacy/from-report', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ report_zip: selectedReport, year: Number(year) }),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.detail || 'ล้มเหลว')
+      setArchiveMsg(`เพิ่มปี ${d.year} แล้ว ${d.added.toLocaleString()} ไฟล์ (รวมทั้งหมด ${d.count.toLocaleString()})`)
+      setLegacyZips(prev => [d, ...prev])
+      setSelectedLegacy(d.filename)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setArchiving(false)
+    }
+  }
+
   const hasReports = latestReports.length > 0
   const canMerge   = hasReports && selectedReport && !merging
 
@@ -106,6 +139,19 @@ export default function MergePanel({ latestReports = [] }) {
               ))}
             </select>
           </div>
+
+          {/* เก็บ report เป็นข้อมูลย้อนหลัง */}
+          <button
+            onClick={handleArchive}
+            disabled={!selectedReport || archiving}
+            title="แปลง report ที่เลือกให้เป็นข้อมูลย้อนหลังของปีนั้น แล้วรวมเข้ากับ pack ล่าสุด"
+            className="w-full text-[11px] py-1.5 rounded-lg border border-dashed border-gray-200 text-gray-500 hover:border-brand/50 hover:text-brand transition-colors disabled:opacity-50"
+          >
+            {archiving ? 'กำลังเก็บ...' : '+ เก็บ report นี้เป็นข้อมูลย้อนหลังด้วย'}
+          </button>
+          {archiveMsg && (
+            <p className="text-[11px] text-green-600 bg-green-50 rounded-lg px-2.5 py-1.5">{archiveMsg}</p>
+          )}
 
           {/* select legacy */}
           <div className="space-y-1">

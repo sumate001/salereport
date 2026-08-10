@@ -777,8 +777,15 @@ def convert_datasale_folder(source_dir: str, output_dir: str,
 
     stats = {'total_files': 0, 'total_books': 0, 'errors': [], 'error_paths': []}
 
+    # โฟลเดอร์ที่มีไฟล์ .skip_legacy_convert คือ report ที่ระบบ generate เอง
+    # (format ใหม่อยู่แล้ว) — ข้ามทั้ง subtree ไม่ต้องแปลงซ้ำ
+    skip_roots = [m.parent for m in source.rglob('.skip_legacy_convert')]
+
+    def _skipped(f: Path) -> bool:
+        return any(root in f.parents for root in skip_roots)
+
     all_files = [f for f in sorted(source.rglob('*.xls*'))
-                 if not f.name.startswith('~')]
+                 if not f.name.startswith('~') and not _skipped(f)]
     total_files = len(all_files)
 
     if progress_cb:

@@ -8,3 +8,8 @@ __pycache__/
 # Local data & temp
 DataSale/
 backend/diag.py
+
+# ชุดข้อมูลดิบและผลลัพธ์ที่รันในเครื่อง
+25.5.69/
+output/
+.~lock.*#

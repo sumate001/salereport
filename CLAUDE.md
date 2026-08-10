@@ -10,12 +10,12 @@
 รับ Excel ต้นฉบับ 6 ไฟล์ → คำนวณ royalty → สร้าง Excel report แยกต่อ Agency/Contract → ZIP → ดาวน์โหลด
 
 มี 2 output mode:
-1. **สร้าง Report** (ปีปัจจุบัน) — dataset 6 ไฟล์ → generate ZIP
+1. **สร้าง Report** (ปีปัจจุบัน) — dataset (6 ไฟล์ หรือ 9 ไฟล์ดิบ) → generate ZIP
 2. **ข้อมูลย้อนหลัง** — แปลงไฟล์ report เก่า (DataSale/) ให้เป็น format ใหม่
 3. **รวมข้อมูลย้อนหลัง** (Step 2) — นำ output จาก 1 + 2 มา stack ตามปี → ZIP ฉบับสมบูรณ์
 
 **Working directory:** `/Users/sumate/Desktop/project/salereport`  
-**Version:** v0.46
+**Version:** v0.49
 
 ---
 
@@ -49,6 +49,7 @@ salereport/
 ├── backend/
 │   ├── main.py                ← FastAPI app: routes, session management, file I/O
 │   ├── report_engine.py       ← Logic ทั้งหมด: อ่านข้อมูล, คำนวณ, เขียน Excel
+│   ├── item_builder.py        ← ประกอบ item master จากไฟล์ดิบ (ชุดตั้งแต่ 2026.1)
 │   ├── legacy_converter.py    ← แปลง report เก่าจาก DataSale/ → format ใหม่
 │   ├── history_merger.py      ← รวม report ปัจจุบัน + legacy output → ZIP ฉบับสมบูรณ์
 │   ├── diag.py                ← diagnostic tool
@@ -88,7 +89,54 @@ salereport/
 
 ---
 
-## ไฟล์ Input ที่ต้องใช้ (6 slots)
+## ไฟล์ Input — 2 โหมด
+
+ตั้งแต่ชุดข้อมูลปี 2026.1 ระบบต้นทาง **ไม่ส่งไฟล์ item master มาให้แล้ว** (ไฟล์
+`ยอดขาย-ลิขสิทธิ์.xlsx` เดิมเป็นของที่คนนั่ง vlookup ประกอบเอง) จึงมี 2 โหมดอัปโหลด
+
+| โหมด | endpoint | ใช้กับ |
+|------|----------|--------|
+| **มีไฟล์ item** | `POST /api/datasets` | ชุดข้อมูลถึงปี 2025 (6 ไฟล์ตามตารางล่าง) |
+| **ไฟล์ดิบ** | `POST /api/datasets/raw` | ชุดข้อมูลตั้งแต่ 2026.1 (9 ไฟล์ — ระบบประกอบ item ให้เอง) |
+
+โหมดไฟล์ดิบใช้ `item_builder.build_item_frame()` ประกอบ DataFrame ที่มี layout `ItemCol`
+เป๊ะ แล้วเขียนเป็น `item.xlsx` ลง dataset dir → ทุกอย่างหลังจากนั้น (generate, dashboard,
+merge) ทำงานเหมือนชุดข้อมูลปีก่อนๆ ไม่ต้องแยกทาง
+
+### โหมดไฟล์ดิบ — slot เพิ่ม 4 ไฟล์
+
+| Slot | ไฟล์ | header row | key |
+|------|------|-----------|-----|
+| `databook` | item (data book).xlsx | แถวแรก | เลขงาน (`Item number`) |
+| `acorp` | ยอดขาย-ฝากขาย Acorp.xlsx | index 10 | เลขงาน (col 6) |
+| `abook` | ยอดขาย-ขายขาด Abook.xlsx | index 1 | barcode = ISBN (col 1) |
+| `stock` | Stock คงเหลือ.xlsx | index 13 | เลขงาน (col 0) |
+
+**กติกาที่ยืนยันกับฝ่ายลิขสิทธิ์:**
+- ราคาปก → `ราคาขาย` (ตรงกับ item 2025 ที่ 99.8%)
+- **จำนวนพิมพ์ (col D) → `ยอดผลิตรายงานเมืองนอก` ไม่ใช่ `Job quantity`** — Job quantity
+  คือยอดที่โรงพิมพ์พิมพ์จริงรวมส่วนเผื่อพิมพ์เสีย (4,891) ส่วนที่แจ้งเจ้าของลิขสิทธิ์
+  เป็นตัวเลขกลม (4,800) เอาไปคิด royalty ไม่ได้ · ตรวจกับ item 2025: ยอดผลิตรายงาน
+  เมืองนอกตรง **99.9%** / Job quantity ตรงแค่ **2.3%**
+- Stock คงเหลือ (col P) → **WH03 ของ Amarin เท่านั้น** ไม่บวก Acorp/Abook
+- Previous balance (col L) → ยกจาก report ปีก่อน | Balance paid (col M) → เว้นว่าง
+- E-Book (ItemCol 74–81) → รอบ 2026.1 ไม่มีไฟล์มาให้ → เว้นว่าง
+
+**สกุลเงินมาจาก intra:** ไฟล์ `item (data book).xlsx` ไม่มีคอลัมน์ ADV/Payment Currency
+(ไฟล์ Data หนังสือเล่ม รุ่นก่อนมี) ถ้าเว้นว่าง `_build_rows()` จะ default เป็น USD ทุกเล่ม
+→ `read_intra_advance()` ดึงจากคอลัมน์ `AdvPay` ของ intra ที่เก็บเป็น `"2600.00 USD"`
+join ด้วย ISBN เพราะ intra ไม่มีคอลัมน์เลขงาน · คอลัมน์ BookTH01–10 เก็บเป็น
+`"9789748491721 ชื่อหนังสือ"` (ISBN แล้วตามด้วยชื่อ) ต้อง match แบบ prefix
+· ครอบคลุม 67% ของเล่มที่ขึ้น report (ไฟล์ item 2025 มีแค่ 20%)
+
+**Rate Royalty** ไม่มีในไฟล์ databook แล้ว — `_build_rows()` fallback ไปใช้ rt tier
+ของ intra ให้อยู่แล้ว จึงเว้นว่างไว้
+
+**ยอดขาย Abook นับซ้ำไม่ได้:** ไฟล์ Abook ให้ยอดต่อ ISBN แต่ ISBN เดียวใช้ซ้ำได้ทุก
+print-run (พบสูงสุด 44 เลขงาน/ISBN) → `_abook_sold_per_job()` ลงยอดที่ occurrence
+**แรก** เท่านั้น ตามพฤติกรรม VLOOKUP ของไฟล์ item ปี 2025 (ตรวจแล้ว 94.8%)
+
+## ไฟล์ Input โหมดมีไฟล์ item (6 slots)
 
 | Slot | ไฟล์ | Sheet | รายละเอียด |
 |------|------|-------|-----------|
@@ -130,7 +178,8 @@ cd frontend && npm run dev
 ### Datasets
 | Method | Path | คำอธิบาย |
 |--------|------|----------|
-| `POST` | `/api/datasets` | Upload 6 files, สร้าง dataset |
+| `POST` | `/api/datasets` | Upload 6 files (มีไฟล์ item) + `label`, `year` |
+| `POST` | `/api/datasets/raw` | Upload 9 files (ไฟล์ดิบ) + `label`, `year`, `period` → ประกอบ item ให้ |
 | `GET` | `/api/datasets` | List ทุก dataset |
 | `PATCH` | `/api/datasets/{id}` | แก้ชื่อ label |
 | `DELETE` | `/api/datasets/{id}` | ลบ dataset |
@@ -172,6 +221,7 @@ cd frontend && npm run dev
 ### Merge History (Step 2)
 | Method | Path | คำอธิบาย |
 |--------|------|----------|
+| `POST` | `/api/legacy/from-report` | เก็บ report ที่ generate แล้ว → ข้อมูลย้อนหลังของปีนั้น |
 | `POST` | `/api/merge-history` | รวม report + legacy → merged ZIP |
 | `GET` | `/api/merged-reports` | List ทุก merged ZIP |
 | `GET` | `/api/merged-reports/{filename}` | Download merged ZIP |
@@ -238,11 +288,19 @@ cd frontend && npm run dev
 > **หมายเหตุ:** Item format ปัจจุบัน **ไม่มี** "test" column ที่ position 6  
 > ถ้าพบ format เก่า ทุก index ตั้งแต่ 5 ขึ้นไปจะต่างกัน 1
 
-**`IntraCol`** — column indices ของ Intra sheet (skiprows=3):
-- AGENT=2, PUBLISHER=5, COUNTRY=6, EXP_DATE=27, SELL_OFF=28
-- RT tiers: RT1_TEXT=16, RT1_PRICE=17 … RT5_TEXT=24, RT5_PRICE=25
+**`IntraCol`** — ตำแหน่งใน **canonical frame** ไม่ใช่ตำแหน่งในไฟล์
 
-**`ExchangeCol`** — ปี 2025: Q1=29, Q2=30, Q3=31, Q4=32
+ไฟล์ `RptRightAcc_*` เปลี่ยน layout ทุกปี (ปี 2026 ย้าย `Title(Eng Trans)` จากตำแหน่ง 9
+ไปท้ายไฟล์ → ทุกคอลัมน์ตั้งแต่ 9 เลื่อนซ้าย 1 ช่อง) `read_intra_file()` จึง re-index
+ทุกไฟล์ลง `INTRA_CANONICAL` **ด้วยชื่อหัวตาราง** (header อยู่แถว index 2) ก่อน concat
+→ IntraCol ใช้ index คงที่ได้โดยไม่ต้องแก้ทุกปี คอลัมน์ที่ไฟล์ไม่มีจะว่าง คอลัมน์เกิน
+ถูกต่อท้ายไว้ให้ auto-detect ISBN ยังทำงาน
+
+> ก่อน v0.47 โค้ดอ่าน `EXP_DATE=27` / `SELL_OFF=28` ด้วย index ตายตัว ซึ่งในไฟล์ปี 2025
+> ตำแหน่ง 27 คือ *วันเริ่มสัญญา* และ 28 คือ *วันหมดอายุ* → off-by-one มาตั้งแต่แรก
+> แก้แล้วทำให้เล่มที่ผ่าน sell-off filter เพิ่มจาก 17,390 → 17,775 บน dataset 2025
+
+**`ExchangeCol`** — `quarter(year, q)` คำนวณ index เอง (2025 = 29–32, 2026 = 33–36)
 
 ### Methods สำคัญ
 
@@ -363,6 +421,26 @@ Col N  (PERIOD BAL)   = =L{r}-(I10+I12+...)+M{r}
 
 ## History Merger (history_merger.py)
 
+### ปีที่ระบบสร้างเอง ต้องเก็บเข้า legacy pack ด้วย
+
+`DataSale/` มี report ต้นฉบับถึงปี 2024 เท่านั้น — ตั้งแต่ปี 2025 ระบบนี้เป็นคน generate
+เอง ถ้าไม่เก็บกลับเข้า legacy pack ปีนั้นจะ **หายไปจากไฟล์ merged** (เจอตอนตรวจ 2026.1:
+legacy pack มี 2016–2024 ครบ แต่ 2025 มีแค่ 5 ไฟล์)
+
+`archive_report_as_legacy()` แปลงชื่อไฟล์ report → legacy แล้วรวมกับ pack เดิม:
+
+```
+report : {agent}/{publisher}/{ISBN} - {title_en} - {title_th}.xlsx
+legacy : {year}/{agent}/{publisher}/{title_en} - {title_th}_{period}.xlsx
+```
+
+เรียกผ่าน `POST /api/legacy/from-report` หรือปุ่ม "เก็บ report นี้เป็นข้อมูลย้อนหลังด้วย"
+ใน MergePanel · ชื่อชนกันจะเติม `_2`, `_3` เหมือน legacy_converter
+
+> ไฟล์ปี 2025 ถูกแตกไว้ที่ `DataSale/Report 2025/` เพื่อให้อยู่ที่เดียวกับปีอื่นด้วย
+> โฟลเดอร์นั้นมีไฟล์ `.skip_legacy_convert` กำกับ — `convert_datasale_folder()` จะข้าม
+> ทั้ง subtree เพราะไฟล์ข้างในเป็น format ใหม่อยู่แล้ว ถ้าปล่อยให้แปลงซ้ำจะได้ผลผิด
+
 รวม report ปัจจุบัน (จาก `reports/`) กับข้อมูลย้อนหลัง (จาก `legacy_reports/`) เป็น ZIP ฉบับสมบูรณ์
 
 ### Matching Algorithm
@@ -392,40 +470,22 @@ merged_{base}_{YYYYMMDD}_{HHMMSS}.zip                     ← Step 2 output
 
 ---
 
-## ⚠️ Hardcoded Values ที่ต้องแก้ก่อนปี 2026
+## ปีของ report (แก้ hardcode แล้วใน v0.47)
 
-### backend/report_engine.py
+ปีไม่ผูกกับโค้ดอีกต่อไป — user เลือกตอน upload แล้วเก็บใน `meta.json` → `year`
 
-```python
-# 1. ปีที่ hardcode
-return 2025  # report_year_from_period() — ต้องรับ year parameter
+| จุด | ทำงานยังไง |
+|-----|-----------|
+| `ReportEngine(..., year=)` | ทุก call site สร้างผ่าน `_engine(session)` ใน main.py |
+| `ExchangeCol.quarter(year, q)` | คำนวณ index จาก `BASE_YEAR=2018, BASE_COL=1` (ปีละ 4 คอลัมน์) — 2025 = 29–32, 2026 = 33–36 |
+| `period_end_label(period, year)` | "For the Period Ended June 30, {year}" |
+| `period_label(period, year)` ใน main.py | แทน `PERIOD_LABELS` เดิม |
+| `periodsFor(year)` ใน GeneratePanel.jsx | ปีจาก `activeDataset.year` |
 
-# 2. Exchange rate column indices — ปี 2026 จะเลื่อน +4
-class ExchangeCol:
-    Q2_2025 = 30
-    Q4_2025 = 32
+dataset เก่าที่ไม่มี `year` ใน meta → default `DEFAULT_REPORT_YEAR = 2025`
 
-# 3. Period end string
-"For the Period Ended December 31, 2025"
-```
-
-### backend/main.py
-
-```python
-PERIOD_LABELS = {
-    "bi1": "BI-Annual 2025.1  (ม.ค. – มิ.ย.)",  # ← ปี
-}
-```
-
-### frontend/src/components/GeneratePanel.jsx
-
-```javascript
-const PERIODS = [
-  { id: 'bi1', label: 'BI-Annual 2025.1', ... },  // ← ปี
-]
-```
-
-**วิธีแก้ที่แนะนำ:** เพิ่ม `year` field ใน dataset metadata ให้ user เลือกตอน upload
+> ⚠️ ไฟล์อัตราแลกเปลี่ยนของปีที่ยังไม่จบจะมีแค่ Q2 — ถ้า generate รอบ bi2/annual
+> ของปีนั้น `get_rate()` จะคืน 1.0 เงียบๆ ทำให้ Amount (CCY) = Amount (THB)
 
 ---
 
@@ -436,7 +496,7 @@ const PERIODS = [
 | 1 | Payment Currency = `"Unknow"` ~54% ของ dataset | Amount (CCY) อาจผิด |
 | 2 | JPY (Item) ↔ JYP (Exchange sheet) | มี workaround แล้ว |
 | 3 | Exchange Rate มีแค่ Q2/Q4 | Q1/Q3 ว่าง |
-| 4 | ปี hardcode 2025 | ปี 2026 จะพัง |
+| 4 | อัตราแลกเปลี่ยนของปีที่ยังไม่จบมีแค่ Q2 | generate bi2/annual ของปีนั้น → rate = 1.0 เงียบๆ |
 | 5 | E-Book units sold ไม่มี | Copies Sold แสดงว่าง |
 | 6 | History merge matching ใช้ title_en เท่านั้น | ชื่อต่างกันเล็กน้อย (ใส่วงเล็บ, ตัวสะกด) อาจ miss |
 
@@ -469,6 +529,9 @@ const PERIODS = [
 
 | Version | รายละเอียด |
 |---------|----------|
+| v0.49 | `archive_report_as_legacy()` + `POST /api/legacy/from-report` + ปุ่มใน MergePanel — เก็บ report ที่ generate แล้วเข้า legacy pack (ปี 2025 เคยหายจาก merged เพราะ DataSale มีถึง 2024), HistoryPanel แสดงไฟล์ครบตาม slot จริงของแต่ละ dataset, `convert_datasale_folder()` ข้ามโฟลเดอร์ที่มี `.skip_legacy_convert` |
+| v0.48 | เปลี่ยน databook slot เป็นไฟล์ `item (data book).xlsx`: col D ใช้ `ยอดผลิตรายงานเมืองนอก` (เดิมใช้ `Job quantity` = ยอดพิมพ์จริง ซึ่งผิด), ราคาปกใช้ `ราคาขาย`, เพิ่ม `read_intra_advance()` ดึง advance + สกุลเงินจาก AdvPay ของ intra |
+| v0.47 | รองรับชุดข้อมูล 2026.1 ที่ไม่มีไฟล์ item: `item_builder.py` + `POST /api/datasets/raw` + โหมดอัปโหลดใน UploadPanel, `read_intra_file()` map คอลัมน์ intra ด้วยชื่อหัวตาราง (แก้ off-by-one EXP_DATE/SELL_OFF ที่มีมาแต่เดิม), ปี report เป็น parameter ทั้งระบบ (`ExchangeCol.quarter()`, `period_end_label()`, `period_label()`, `periodsFor()`) |
 | v0.46 | history_merger.py: รวม report + legacy ตามปี (Step 2), MergePanel.jsx, `/api/merge-history` + `/api/merged-reports`, แก้ legacy_converter อ่านไฟล์ 65536 rows ไม่ hang (read_only+timeout) |
 | v0.45 | Agent search filter, Excel: Cambria + light cyan `#E0FFFF` + merge A7:A9/B7:B9, cols P/Q/R (Stock/DIF/จ่าย) คงไว้, legacy_converter ใช้ format เดียวกัน |
 | v0.44 | Generate per-book jobs, error cards, filter_label badge |

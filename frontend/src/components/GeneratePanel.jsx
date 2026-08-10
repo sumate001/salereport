@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { generateHTML } from '../utils/dashboardHTML'
 
-const PERIODS = [
-  { id: 'bi1',    label: 'BI-Annual 2025.1', sub: 'ม.ค. – มิ.ย.' },
-  { id: 'bi2',    label: 'BI-Annual 2025.2', sub: 'ก.ค. – ธ.ค.' },
-  { id: 'annual', label: 'Annual 2025',       sub: 'ม.ค. – ธ.ค.' },
+// ปีมาจาก dataset ที่เลือก (ตั้งตอนอัปโหลด) — ไม่ผูกกับปีใดปีหนึ่งในโค้ด
+const periodsFor = year => [
+  { id: 'bi1',    label: `BI-Annual ${year}.1`, sub: 'ม.ค. – มิ.ย.' },
+  { id: 'bi2',    label: `BI-Annual ${year}.2`, sub: 'ก.ค. – ธ.ค.' },
+  { id: 'annual', label: `Annual ${year}`,      sub: 'ม.ค. – ธ.ค.' },
 ]
 
 function Spinner() {
@@ -17,6 +18,7 @@ function Spinner() {
 }
 
 export default function GeneratePanel({ activeDataset, onGenerationStart, onReportGenerated, onReportError, onDashboardGenerated }) {
+  const PERIODS = periodsFor(activeDataset?.year ?? new Date().getFullYear())
   const [selected,      setSelected]      = useState(new Set(['annual']))
   const [genReport,     setGenReport]     = useState(false)
   const [genDash,       setGenDash]       = useState(false)

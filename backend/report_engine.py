@@ -43,28 +43,115 @@ class ItemCol:
     STATUS_ANNUAL    = 81   # สถานะ 2025
 
 
+# Canonical column order for the intra frame. Every intra file is re-indexed onto
+# this layout by header name at load time (see ReportEngine.intra), so IntraCol
+# indices stay valid no matter how the source file orders or renames its columns.
+#
+# ⚠ ไฟล์ RptRightAcc_* เปลี่ยน layout ทุกปี — ปี 2026 ย้าย Title(Eng Trans) จาก
+# ตำแหน่ง 9 ไปท้ายไฟล์ ทำให้ทุกคอลัมน์ตั้งแต่ 9 เลื่อนซ้าย 1 ช่อง ถ้าอ่านด้วย index
+# ตายตัวจะได้ royalty rate ผิดแบบไม่มี error
+INTRA_CANONICAL = [
+    'RightId', 'Paidtype', 'Agent(รับ report)', 'All Agents', 'All Proprietors',
+    'Publisher', 'Country', 'ชื่อหนังสือตามใบขออนุมัติ', 'ชื่อในสัญญา',
+    'Title(Eng Trans)', 'Title(Eng)', 'ชื่อไทย_Book', 'ชื่อไทย_EBook',
+    'ชื่อไทย_EChapter', 'AdvPay', 'Royalty',
+    'rt1_text', 'rt1_price', 'rt2_text', 'rt2_price', 'rt3_text', 'rt3_price',
+    'rt4_text', 'rt4_price', 'rt5_text', 'rt5_price',
+    'คำนวณ report โดยคิดจาก THB', 'วันเริ่มสัญญา', 'วันหมดอายุ', 'SellOffPeriod',
+    'FinalSalesDate', 'สำนักพิมพ์', 'ประเภทลิขสิทธิ์', 'Editor Decision', 'RightCode',
+    'Advanceใช้ร่วมกับBook', 'Advanceใช้ร่วมกับE-Book', 'Advanceใช้ร่วมกับE-Chapter',
+    'Advanceใช้ร่วมกับAudioBook', 'Advanceใช้ร่วมกับE-Library', 'AdvanceNote',
+    'BookTH01', 'BookTH02', 'BookTH03', 'BookTH04', 'BookTH05',
+    'BookTH06', 'BookTH07', 'BookTH08', 'BookTH09', 'BookTH10',
+    'On Copies Sold/Print', 'วิธีคำนวณRoyalty E-Book',
+]
+
+
 class IntraCol:
-    # 4 separate intra files (skiprows=3, sheet_name=0)
-    PAIDTYPE  = 1   # Paidtype
-    AGENT     = 2   # Agent(รับ report)
-    PUBLISHER = 5   # Publisher
-    COUNTRY   = 6   # Country
-    EXP_DATE  = 27  # วันหมดอายุ (E-Book)
-    SELL_OFF  = 28  # SellOffPeriod (Book)
-    # Tiered royalty rate columns Q–Z (0-based)
-    RT1_TEXT  = 16;  RT1_PRICE = 17
-    RT2_TEXT  = 18;  RT2_PRICE = 19
-    RT3_TEXT  = 20;  RT3_PRICE = 21
-    RT4_TEXT  = 22;  RT4_PRICE = 23
-    RT5_TEXT  = 24;  RT5_PRICE = 25
-    # ISBNs: BookTH01–BookTH10 at cols 39–48 (auto-detected)
+    """Positions within the canonical intra frame (INTRA_CANONICAL)."""
+    PAIDTYPE   = INTRA_CANONICAL.index('Paidtype')
+    AGENT      = INTRA_CANONICAL.index('Agent(รับ report)')
+    PUBLISHER  = INTRA_CANONICAL.index('Publisher')
+    COUNTRY    = INTRA_CANONICAL.index('Country')
+    TITLE_EN   = INTRA_CANONICAL.index('Title(Eng)')
+    ADV_PAY    = INTRA_CANONICAL.index('AdvPay')
+    ROYALTY    = INTRA_CANONICAL.index('Royalty')
+    START_DATE = INTRA_CANONICAL.index('วันเริ่มสัญญา')
+    EXP_DATE   = INTRA_CANONICAL.index('วันหมดอายุ')     # E-Book
+    SELL_OFF   = INTRA_CANONICAL.index('SellOffPeriod')  # Book
+    # Tiered royalty rate columns
+    RT1_TEXT = INTRA_CANONICAL.index('rt1_text');  RT1_PRICE = RT1_TEXT + 1
+    RT2_TEXT = INTRA_CANONICAL.index('rt2_text');  RT2_PRICE = RT2_TEXT + 1
+    RT3_TEXT = INTRA_CANONICAL.index('rt3_text');  RT3_PRICE = RT3_TEXT + 1
+    RT4_TEXT = INTRA_CANONICAL.index('rt4_text');  RT4_PRICE = RT4_TEXT + 1
+    RT5_TEXT = INTRA_CANONICAL.index('rt5_text');  RT5_PRICE = RT5_TEXT + 1
+    # ISBNs: BookTH01–BookTH10 (auto-detected by content, see _init_intra_cols)
+
+
+def _normalize_intra_header(name) -> str:
+    """Collapse whitespace/newlines so header names match across file revisions."""
+    if name is None or (isinstance(name, float) and name != name):
+        return ''
+    return re.sub(r'\s+', '', str(name)).lower()
+
+
+_INTRA_CANONICAL_LOOKUP = {_normalize_intra_header(h): i for i, h in enumerate(INTRA_CANONICAL)}
+
+
+def read_intra_file(path) -> pd.DataFrame:
+    """Read one RptRightAcc_* file and re-index its columns onto INTRA_CANONICAL.
+
+    The header sits on row index 2; data starts on row 3. Columns whose header is
+    not in INTRA_CANONICAL are dropped; canonical columns missing from the file
+    come back empty. Falls back to positional read if the header is unrecognisable.
+    """
+    raw = pd.read_excel(path, sheet_name=0, header=None, dtype=object)
+    if raw.empty:
+        return pd.DataFrame(columns=range(len(INTRA_CANONICAL)))
+
+    header = raw.iloc[2] if len(raw) > 2 else pd.Series(dtype=object)
+    src_for_canon = {}
+    for src_idx, name in enumerate(header):
+        key = _normalize_intra_header(name)
+        canon_idx = _INTRA_CANONICAL_LOOKUP.get(key)
+        if canon_idx is not None and canon_idx not in src_for_canon:
+            src_for_canon[canon_idx] = src_idx
+
+    data = raw.iloc[3:].reset_index(drop=True)
+
+    # Too few headers recognised → header row is not where we expect it. Keep the
+    # positional layout so at least the auto-detected job/ISBN matching still works.
+    if len(src_for_canon) < 10:
+        return data
+
+    out = pd.DataFrame(index=data.index, columns=range(len(INTRA_CANONICAL)), dtype=object)
+    for canon_idx, src_idx in src_for_canon.items():
+        out.iloc[:, canon_idx] = data.iloc[:, src_idx].values
+
+    # Carry over any extra source columns (e.g. unmapped ISBN-bearing columns) so
+    # content-based auto-detection keeps working.
+    mapped = set(src_for_canon.values())
+    extra = [c for c in range(data.shape[1]) if c not in mapped]
+    if extra:
+        tail = data.iloc[:, extra]
+        tail.columns = range(len(INTRA_CANONICAL), len(INTRA_CANONICAL) + len(extra))
+        out = pd.concat([out, tail], axis=1)
+    return out
 
 
 class ExchangeCol:
-    Q1_2025 = 29
-    Q2_2025 = 30
-    Q3_2025 = 31
-    Q4_2025 = 32
+    """ตำแหน่งคอลัมน์ในไฟล์อัตราแลกเปลี่ยน
+
+    ไฟล์จัดเป็นบล็อกละปี ปีละ 4 คอลัมน์ (Q1–Q4) เรียงต่อกันจากปี BASE_YEAR
+    ที่คอลัมน์ BASE_COL — ปี 2025 = 29–32, ปี 2026 = 33–36
+    """
+    BASE_YEAR = 2018
+    BASE_COL  = 1
+
+    @classmethod
+    def quarter(cls, year: int, q: int) -> int:
+        """คืน index คอลัมน์ของไตรมาส q (1–4) ในปีที่ระบุ"""
+        return cls.BASE_COL + (year - cls.BASE_YEAR) * 4 + (q - 1)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -128,8 +215,18 @@ def extract_year(val):
     return None
 
 
-def report_year_from_period(period: str) -> int:
-    return 2025
+DEFAULT_REPORT_YEAR = 2025
+
+
+def report_year_from_period(period: str, year: int = DEFAULT_REPORT_YEAR) -> int:
+    """ปีของ report — ทุก period ในชุดข้อมูลเดียวกันอยู่ปีเดียวกัน"""
+    return year
+
+
+def period_end_label(period: str, year: int = DEFAULT_REPORT_YEAR) -> str:
+    if period == 'bi1':
+        return f'For the Period Ended June 30, {year}'
+    return f'For the Period Ended December 31, {year}'
 
 
 def _date_sort_key(val):
@@ -228,11 +325,15 @@ def apply_rt_tiers(copies_sold, tiers):
 # ─── ReportEngine ─────────────────────────────────────────────────────────────
 
 class ReportEngine:
-    def __init__(self, item_path: str, intra_paths, exchange_path: str):
+    def __init__(self, item_path: str, intra_paths, exchange_path: str,
+                 year: int = DEFAULT_REPORT_YEAR, item_frame=None):
+        self.year          = int(year)
         self.item_path     = item_path
         self.intra_paths   = intra_paths if isinstance(intra_paths, list) else [intra_paths]
         self.exchange_path = exchange_path
-        self._item_df      = None
+        # item_frame: ใช้ item master ที่ประกอบมาแล้ว (ชุดข้อมูลตั้งแต่ 2026.1 ที่ไม่มี
+        # ไฟล์ item ส่งมา — ดู item_builder.build_item_frame) แทนการอ่านจาก Excel
+        self._item_df      = item_frame
         self._intra_df     = None
         self._rates        = {}
         self._intra_job_col   = -1
@@ -253,10 +354,7 @@ class ReportEngine:
     @property
     def intra(self):
         if self._intra_df is None:
-            dfs = [
-                pd.read_excel(p, sheet_name=0, skiprows=3, header=None, dtype=object)
-                for p in self.intra_paths
-            ]
+            dfs = [read_intra_file(p) for p in self.intra_paths]
             self._intra_df = pd.concat(dfs, ignore_index=True)
         return self._intra_df
 
@@ -270,12 +368,13 @@ class ReportEngine:
             currency = safe_str(row.iloc[0])
             if not currency:
                 continue
-            self._rates[currency] = {
-                'Q1': safe_float(row.iloc[ExchangeCol.Q1_2025], 1.0),
-                'Q2': safe_float(row.iloc[ExchangeCol.Q2_2025], 1.0),
-                'Q3': safe_float(row.iloc[ExchangeCol.Q3_2025], 1.0),
-                'Q4': safe_float(row.iloc[ExchangeCol.Q4_2025], 1.0),
-            }
+            quarters = {}
+            for q in range(1, 5):
+                col = ExchangeCol.quarter(self.year, q)
+                quarters[f'Q{q}'] = (
+                    safe_float(row.iloc[col], 1.0) if col < len(row) else 1.0
+                )
+            self._rates[currency] = quarters
 
     def get_rate(self, currency: str, period: str) -> float:
         self._ensure_rates()
@@ -439,7 +538,7 @@ class ReportEngine:
         return None
 
     def _passes_selloff(self, item_row, period: str) -> bool:
-        report_yr  = report_year_from_period(period)
+        report_yr  = report_year_from_period(period, self.year)
         job        = safe_str(item_row.iloc[ItemCol.JOB])
         is_ebook   = job.upper().startswith('EB/')
         self._init_intra_cols()
@@ -591,7 +690,7 @@ class ReportEngine:
 
             # UNSOLD COPIES (new prints only)
             any_new_print = any(
-                extract_year(r.iloc[ItemCol.DATE_PRINTED]) == report_year_from_period(period)
+                extract_year(r.iloc[ItemCol.DATE_PRINTED]) == report_year_from_period(period, self.year)
                 for r, _ in run_data
             )
             unsold_copies = (
@@ -1102,14 +1201,14 @@ class ReportEngine:
             if s in advance_status:
                 advance_status[s] += 1
 
-        # ── Sell-off expiring (year = 2025) ───────────────────────────────────
+        # ── Sell-off expiring (ปีของ report) ──────────────────────────────────
         expiring = set()
         for _, row in self.intra.iterrows():
             try:
                 sell_yr = extract_year(row.iloc[IntraCol.SELL_OFF])
             except Exception:
                 continue
-            if sell_yr == 2025:
+            if sell_yr == self.year:
                 for isbn_col in self._intra_isbn_cols:
                     v = safe_str(row.iloc[isbn_col])
                     if v:
@@ -1170,6 +1269,7 @@ class ReportEngine:
                 'with_sales':        with_sales,
                 'zero_sales':        zero_sales,
                 'expiring_2025':     len(expiring),
+                'report_year':       self.year,
                 'total_royalty_thb': round(total_royalty, 0),
             },
             'advance_status':  advance_status,
@@ -1209,12 +1309,7 @@ class ReportEngine:
             'bi2': '   ANNUAL               x  BI-ANNUAL',
         }.get(period, 'x  ANNUAL               BI-ANNUAL')
 
-        period_end = {
-            'bi1':    'For the Period Ended June 30, 2025',
-            'bi2':    'For the Period Ended December 31, 2025',
-            'annual': 'For the Period Ended December 31, 2025',
-            'all':    'For the Period Ended December 31, 2025',
-        }.get(period, 'For the Period Ended December 31, 2025')
+        period_end = period_end_label(period, self.year)
 
         # ── Rows 1-6: header block ────────────────────────────────────────────
         # Row 3: agency (the intermediate agent sending the report — e.g. Silkroad)
@@ -1450,9 +1545,10 @@ class ReportEngine:
 
             row += 1
 
-        write_section('BI-ANNUAL 2025.1  (January – June 2025)',      bi1_rows, 'bi1')
-        write_section('BI-ANNUAL 2025.2  (July – December 2025)',     bi2_rows, 'bi2')
-        write_section('ANNUAL 2025  (January – December 2025)',        an_rows,  'annual')
+        yr = self.year
+        write_section(f'BI-ANNUAL {yr}.1  (January – June {yr})',      bi1_rows, 'bi1')
+        write_section(f'BI-ANNUAL {yr}.2  (July – December {yr})',     bi2_rows, 'bi2')
+        write_section(f'ANNUAL {yr}  (January – December {yr})',       an_rows,  'annual')
 
         # ── Col 14: PERIOD BALANCE formula ────────────────────────────────────
         # Written after all sections so the SUM covers every amount row.

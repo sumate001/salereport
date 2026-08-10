@@ -65,6 +65,67 @@ def title_en_from_legacy_name(name: str) -> str:
     return _norm(segs[0])
 
 
+# ── แปลง report ที่ generate แล้ว → ข้อมูลย้อนหลังของปีนั้น ─────────────────────────
+
+PERIOD_SUFFIX_BY_ID = {'bi1': 'BI-H1', 'bi2': 'BI-H2', 'annual': 'Annual'}
+
+
+def report_arcname_to_legacy(arcname: str, year: int, period_suffix: str) -> Optional[str]:
+    """'Agent/Publisher/9786161844684 - Title EN - ชื่อไทย.xlsx'
+       → '2025/Agent/Publisher/Title EN - ชื่อไทย_Annual.xlsx'"""
+    parts = Path(arcname).parts
+    if len(parts) < 2 or not arcname.endswith('.xlsx'):
+        return None
+    stem = re.sub(r'^\d{10,13}\s*-\s*', '', Path(parts[-1]).stem)
+    return '/'.join([str(year), *parts[:-1], f'{stem}_{period_suffix}.xlsx'])
+
+
+def archive_report_as_legacy(report_zip: Path, output_zip: Path, year: int,
+                             period: str, base_legacy_zip: Optional[Path] = None) -> dict:
+    """สร้าง legacy ZIP ที่มีข้อมูลของ report ปีที่ระบุเพิ่มเข้าไป
+
+    report ที่ระบบ generate เองในปีหนึ่ง จะกลายเป็น "ข้อมูลย้อนหลัง" ของปีถัดไป แต่
+    โครงสร้างชื่อไฟล์ต่างกัน (report มี ISBN นำหน้า / legacy มีปีเป็นโฟลเดอร์บนสุดและ
+    period ต่อท้าย) ฟังก์ชันนี้แปลงให้ตรงกับที่ `build_legacy_index()` อ่านได้
+
+    base_legacy_zip: legacy pack เดิมที่จะเอามารวมด้วย (ไฟล์ปีเดียวกันไม่ถูกทับ —
+    ถ้าชื่อชนกันจะเติม _2, _3 เหมือนที่ legacy_converter ทำ)
+    """
+    suffix = PERIOD_SUFFIX_BY_ID.get(period, 'Annual')
+    copied = skipped = carried = 0
+    used: set[str] = set()
+
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as out:
+        if base_legacy_zip and Path(base_legacy_zip).exists():
+            with zipfile.ZipFile(base_legacy_zip, 'r') as base:
+                for name in base.namelist():
+                    if name.endswith('/'):
+                        continue
+                    out.writestr(name, base.read(name))
+                    used.add(name)
+                    carried += 1
+
+        with zipfile.ZipFile(report_zip, 'r') as rep:
+            for name in sorted(rep.namelist()):
+                target = report_arcname_to_legacy(name, year, suffix)
+                if target is None:
+                    skipped += 1
+                    continue
+                if target in used:
+                    stem, ext = target[:-5], target[-5:]
+                    n = 2
+                    while f'{stem}_{n}{ext}' in used:
+                        n += 1
+                    target = f'{stem}_{n}{ext}'
+                out.writestr(target, rep.read(name))
+                used.add(target)
+                copied += 1
+
+    return {'year': year, 'period': suffix, 'added': copied,
+            'carried_over': carried, 'skipped': skipped}
+
+
 # ── Build index of legacy ZIP ───────────────────────────────────────────────────
 
 _PERIOD_EXTRACT = re.compile(

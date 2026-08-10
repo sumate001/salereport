@@ -12,10 +12,12 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+import pandas as pd
 
-from report_engine import ReportEngine
+from report_engine import ReportEngine, DEFAULT_REPORT_YEAR
+from item_builder import build_item_frame, build_stats, ITEM_WIDTH
 from legacy_converter import convert_datasale_folder, convert_specific_files
-from history_merger import merge_report_with_history
+from history_merger import merge_report_with_history, archive_report_as_legacy
 
 # ── Persistent storage ─────────────────────────────────────────────────────────
 HOME          = Path.home() / ".sale_report"
@@ -23,14 +25,18 @@ DATASETS_DIR  = HOME / "datasets";   DATASETS_DIR.mkdir(parents=True, exist_ok=T
 REPORTS_DIR   = HOME / "reports";    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SNAPSHOTS_DIR = HOME / "dashboards"; SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
-PERIOD_LABELS = {
-    "bi1":    "BI-Annual 2025.1  (ม.ค. – มิ.ย.)",
-    "bi2":    "BI-Annual 2025.2  (ก.ค. – ธ.ค.)",
-    "annual": "Annual 2025  (ม.ค. – ธ.ค.)",
-    "all":    "ทุกรอบ (BI-Annual + Annual)",
-}
+def period_label(period: str, year: int = DEFAULT_REPORT_YEAR) -> str:
+    return {
+        "bi1":    f"BI-Annual {year}.1  (ม.ค. – มิ.ย.)",
+        "bi2":    f"BI-Annual {year}.2  (ก.ค. – ธ.ค.)",
+        "annual": f"Annual {year}  (ม.ค. – ธ.ค.)",
+        "all":    "ทุกรอบ (BI-Annual + Annual)",
+    }.get(period, period)
 
 FILE_SLOTS = ["item", "intra_1", "intra_2", "intra_3", "intra_4", "exchange"]
+
+# ชุดข้อมูลตั้งแต่ปี 2026.1 ไม่มีไฟล์ item ส่งมา — ระบบประกอบเองจากไฟล์ดิบ 4 ไฟล์นี้
+RAW_FILE_SLOTS = ["databook", "acorp", "abook", "stock"]
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Sales Report API")
@@ -64,9 +70,16 @@ def _ensure_session(dataset_id: str) -> dict:
         "output_dir":    str(out_dir),
         "label":         meta.get("label", ""),
         "dataset_id":    dataset_id,
+        "year":          int(meta.get("year", DEFAULT_REPORT_YEAR)),
     }
     SESSIONS[dataset_id] = s
     return s
+
+
+def _engine(s: dict) -> ReportEngine:
+    """สร้าง ReportEngine จาก session — ปีมาจาก dataset metadata"""
+    return ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"],
+                        year=s.get("year", DEFAULT_REPORT_YEAR))
 
 
 # ── Datasets ───────────────────────────────────────────────────────────────────
@@ -74,6 +87,7 @@ def _ensure_session(dataset_id: str) -> dict:
 @app.post("/api/datasets")
 async def create_dataset(
     label:         str        = Form(...),
+    year:          int        = Form(DEFAULT_REPORT_YEAR),
     item_file:     UploadFile = File(...),
     intra_file_1:  UploadFile = File(...),
     intra_file_2:  UploadFile = File(...),
@@ -104,6 +118,7 @@ async def create_dataset(
             str(ds_dir / "item.xlsx"),
             [str(ds_dir / f"intra_{i}.xlsx") for i in range(1, 5)],
             str(ds_dir / "exchange.xlsx"),
+            year=year,
         )
         engine.get_countries()
     except Exception as e:
@@ -117,6 +132,8 @@ async def create_dataset(
         "uploaded_at":        now.isoformat(),
         "ts_slug":            now.strftime("%Y%m%d_%H%M%S"),
         "original_filenames": orig_names,
+        "year":               year,
+        "source":             "item",
     }
     (ds_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
@@ -129,9 +146,112 @@ async def create_dataset(
         "output_dir":    str(out_dir),
         "label":         label,
         "dataset_id":    did,
+        "year":          year,
     }
 
-    return {"dataset_id": did, "label": label, "ts_slug": meta["ts_slug"]}
+    return {"dataset_id": did, "label": label, "ts_slug": meta["ts_slug"], "year": year}
+
+
+@app.post("/api/datasets/raw")
+async def create_dataset_from_raw(
+    label:         str        = Form(...),
+    year:          int        = Form(...),
+    period:        str        = Form("bi1"),
+    databook_file: UploadFile = File(...),   # Data หนังสือเล่ม
+    acorp_file:    UploadFile = File(...),   # ยอดขาย-ฝากขาย Acorp
+    abook_file:    UploadFile = File(...),   # ยอดขาย-ขายขาด Abook
+    stock_file:    UploadFile = File(...),   # Stock คงเหลือ (WH03)
+    intra_file_1:  UploadFile = File(...),
+    intra_file_2:  UploadFile = File(...),
+    intra_file_3:  UploadFile = File(...),
+    intra_file_4:  UploadFile = File(...),
+    exchange_file: UploadFile = File(...),
+):
+    """สร้าง dataset จากไฟล์ดิบ (ชุดข้อมูลตั้งแต่ปี 2026.1 ที่ไม่มีไฟล์ item ส่งมา)
+
+    ระบบประกอบ item master เองแล้วเขียนเป็น item.xlsx ให้เหมือนชุดข้อมูลปีก่อนๆ ทุกอย่าง
+    ที่อยู่หลังจากนี้ (generate / dashboard / merge) จึงทำงานเหมือนเดิมไม่ต้องแยกทาง
+    """
+    if period not in ("bi1", "bi2", "annual"):
+        raise HTTPException(400, "period ต้องเป็น bi1, bi2 หรือ annual")
+
+    did    = str(uuid.uuid4())
+    ds_dir = DATASETS_DIR / did
+    ds_dir.mkdir(parents=True)
+
+    uploads = [
+        (databook_file, "databook"),
+        (acorp_file,    "acorp"),
+        (abook_file,    "abook"),
+        (stock_file,    "stock"),
+        (intra_file_1,  "intra_1"),
+        (intra_file_2,  "intra_2"),
+        (intra_file_3,  "intra_3"),
+        (intra_file_4,  "intra_4"),
+        (exchange_file, "exchange"),
+    ]
+    orig_names: dict[str, str] = {}
+    for f, slot in uploads:
+        with (ds_dir / f"{slot}.xlsx").open("wb") as out:
+            shutil.copyfileobj(f.file, out)
+        orig_names[slot] = f.filename or f"{slot}.xlsx"
+
+    try:
+        stats = build_stats(
+            str(ds_dir / "databook.xlsx"), str(ds_dir / "acorp.xlsx"),
+            str(ds_dir / "abook.xlsx"),    str(ds_dir / "stock.xlsx"),
+        )
+        frame = build_item_frame(
+            str(ds_dir / "databook.xlsx"), str(ds_dir / "acorp.xlsx"),
+            str(ds_dir / "abook.xlsx"),    str(ds_dir / "stock.xlsx"),
+            period=period,
+            intra_paths=[str(ds_dir / f"intra_{i}.xlsx") for i in range(1, 5)],
+        )
+        # เขียนเป็น item.xlsx ในรูปแบบเดียวกับไฟล์ที่ฝ่ายลิขสิทธิ์เคยส่งมา
+        # (sheet 'Item', ข้อมูลเริ่มแถวที่ 3 — ReportEngine อ่านด้วย skiprows=2)
+        with pd.ExcelWriter(ds_dir / "item.xlsx", engine="openpyxl") as writer:
+            frame.to_excel(writer, sheet_name="Item", index=False,
+                           header=False, startrow=2)
+
+        engine = ReportEngine(
+            str(ds_dir / "item.xlsx"),
+            [str(ds_dir / f"intra_{i}.xlsx") for i in range(1, 5)],
+            str(ds_dir / "exchange.xlsx"),
+            year=year,
+        )
+        engine.get_countries()
+    except Exception as e:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise HTTPException(400, f"ประกอบข้อมูลจากไฟล์ดิบไม่สำเร็จ: {e}")
+
+    now  = datetime.now()
+    meta = {
+        "id":                 did,
+        "label":              label,
+        "uploaded_at":        now.isoformat(),
+        "ts_slug":            now.strftime("%Y%m%d_%H%M%S"),
+        "original_filenames": orig_names,
+        "year":               year,
+        "source":             "raw",
+        "build_period":       period,
+        "build_stats":        stats,
+    }
+    (ds_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    out_dir = ds_dir / "output"
+    out_dir.mkdir(exist_ok=True)
+    SESSIONS[did] = {
+        "item_path":     str(ds_dir / "item.xlsx"),
+        "intra_paths":   [str(ds_dir / f"intra_{i}.xlsx") for i in range(1, 5)],
+        "exchange_path": str(ds_dir / "exchange.xlsx"),
+        "output_dir":    str(out_dir),
+        "label":         label,
+        "dataset_id":    did,
+        "year":          year,
+    }
+
+    return {"dataset_id": did, "label": label, "ts_slug": meta["ts_slug"],
+            "year": year, "period": period, "stats": stats}
 
 
 @app.get("/api/datasets")
@@ -179,7 +299,7 @@ def delete_dataset(dataset_id: str):
 def list_books(dataset_id: str, q: str = Query(default="")):
     s = _ensure_session(dataset_id)
     try:
-        engine = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        engine = _engine(s)
         books  = engine.get_books(q)
     except HTTPException:
         raise
@@ -192,7 +312,7 @@ def list_books(dataset_id: str, q: str = Query(default="")):
 def list_agencies(dataset_id: str, q: str = Query(default="")):
     s = _ensure_session(dataset_id)
     try:
-        engine   = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        engine   = _engine(s)
         agencies = engine.get_agencies_from_item(q)
     except HTTPException:
         raise
@@ -203,7 +323,7 @@ def list_agencies(dataset_id: str, q: str = Query(default="")):
 
 @app.get("/api/datasets/{dataset_id}/files/{slot}")
 def download_dataset_file(dataset_id: str, slot: str):
-    if slot not in FILE_SLOTS:
+    if slot not in FILE_SLOTS + RAW_FILE_SLOTS:
         raise HTTPException(403, "Access denied")
     ds_dir = DATASETS_DIR / dataset_id
     if not (ds_dir / "meta.json").exists():
@@ -236,7 +356,7 @@ def generate_all(req: GenerateAllReq):
         raise HTTPException(400, "period ต้องเป็น all | bi1 | bi2 | annual")
     s = _ensure_session(req.dataset_id)
     try:
-        engine   = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        engine   = _engine(s)
         zip_path = engine.generate_all(
             req.period, s["output_dir"],
             isbn_filter=req.isbn_filter if req.isbn_filter else None,
@@ -263,7 +383,7 @@ def generate_all(req: GenerateAllReq):
             "filename":      pname,
             "ts_slug":       ts_slug,
             "period":        req.period,
-            "period_label":  PERIOD_LABELS.get(req.period, req.period),
+            "period_label":  period_label(req.period, s.get("year", DEFAULT_REPORT_YEAR)),
             "size_bytes":    size,
             "dataset_id":    req.dataset_id,
             "dataset_label": s.get("label", ""),
@@ -274,7 +394,7 @@ def generate_all(req: GenerateAllReq):
 
     return {
         "filename":     pname,
-        "period_label": PERIOD_LABELS.get(req.period, req.period),
+        "period_label": period_label(req.period, s.get("year", DEFAULT_REPORT_YEAR)),
         "size_bytes":   size,
         "ts_slug":      ts_slug,
         "dataset_id":   req.dataset_id,
@@ -287,7 +407,7 @@ def generate_all(req: GenerateAllReq):
 def get_dashboard(dataset_id: str = Query(...)):
     try:
         s      = _ensure_session(dataset_id)
-        engine = ReportEngine(s["item_path"], s["intra_paths"], s["exchange_path"])
+        engine = _engine(s)
         return engine.get_dashboard_data()
     except HTTPException:
         raise
@@ -563,6 +683,69 @@ def delete_legacy_report(filename: str):
     (LEGACY_DIR / filename).unlink(missing_ok=True)
     (LEGACY_DIR / filename.replace(".zip", ".json")).unlink(missing_ok=True)
     return {"ok": True}
+
+
+class ArchiveReportReq(BaseModel):
+    report_zip: str                       # report ที่ generate ไว้แล้ว (จาก reports/)
+    year: int                             # ปีของ report นั้น
+    period: Optional[str] = None          # ไม่ส่ง → อ่านจาก metadata ของ report
+    base_legacy_zip: Optional[str] = None # legacy pack ที่จะรวมด้วย (ไม่ส่ง → ใช้ latest)
+
+
+@app.post("/api/legacy/from-report")
+def archive_report(req: ArchiveReportReq):
+    """เก็บ report ที่ generate แล้ว เข้าเป็นข้อมูลย้อนหลังของปีนั้น
+
+    report ปีปัจจุบันจะกลายเป็นข้อมูลย้อนหลังของปีถัดไป — endpoint นี้แปลงโครงสร้าง
+    ชื่อไฟล์ให้ตรงกับที่ merge-history อ่านได้ แล้วรวมเข้ากับ legacy pack เดิม
+    """
+    if not req.report_zip.endswith(".zip") or "/" in req.report_zip or "\\" in req.report_zip:
+        raise HTTPException(400, "report_zip ไม่ถูกต้อง")
+    report_path = REPORTS_DIR / req.report_zip
+    if not report_path.exists():
+        raise HTTPException(404, "ไม่พบไฟล์ report")
+
+    period = req.period
+    if not period:
+        meta_path = REPORTS_DIR / req.report_zip.replace(".zip", ".json")
+        if meta_path.exists():
+            try:
+                period = json.loads(meta_path.read_text(encoding="utf-8")).get("period")
+            except Exception:
+                period = None
+    period = period or "annual"
+
+    if req.base_legacy_zip:
+        if not req.base_legacy_zip.endswith(".zip") or "/" in req.base_legacy_zip:
+            raise HTTPException(400, "base_legacy_zip ไม่ถูกต้อง")
+        base = LEGACY_DIR / req.base_legacy_zip
+        if not base.exists():
+            raise HTTPException(404, "ไม่พบ legacy pack ที่ระบุ")
+    else:
+        packs = sorted(LEGACY_DIR.glob("legacy_*.zip"), reverse=True)
+        base = packs[0] if packs else None
+
+    ts_slug = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fname = f"legacy_{ts_slug}.zip"
+    try:
+        stats = archive_report_as_legacy(
+            report_path, LEGACY_DIR / fname, req.year, period, base
+        )
+    except Exception as e:
+        (LEGACY_DIR / fname).unlink(missing_ok=True)
+        raise HTTPException(400, f"เก็บ report เป็นข้อมูลย้อนหลังไม่สำเร็จ: {e}")
+
+    meta = {
+        "filename":    fname,
+        "ts_slug":     ts_slug,
+        "source":      f"report {req.year} ({stats['period']}) + {base.name if base else 'ไม่มี pack เดิม'}",
+        "count":       stats["added"] + stats["carried_over"],
+        "size_bytes":  (LEGACY_DIR / fname).stat().st_size,
+        **stats,
+    }
+    (LEGACY_DIR / fname.replace(".zip", ".json")).write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    return meta
 
 
 # ── Merge history ──────────────────────────────────────────────────────────────

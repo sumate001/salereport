@@ -164,7 +164,7 @@ export function generateHTML(data, ts) {
       <div class="stat brand"><div class="lbl">ISBNs ทั้งหมด</div><div class="val">${fmtN(summary.total_isbns)}</div><div class="sub">${summary.total_agencies} Agents · ${summary.total_publishers} Publishers</div></div>
       <div class="stat green"><div class="lbl">มียอดขาย</div><div class="val">${fmtN(summary.with_sales)}</div><div class="sub">${Math.round(summary.with_sales/summary.total_isbns*100)}% ของทั้งหมด</div></div>
       <div class="stat red"><div class="lbl">ยอดขาย = 0</div><div class="val">${fmtN(summary.zero_sales)}</div><div class="sub">ต้องพิจารณาตัดหรือเจรจา</div></div>
-      <div class="stat amber"><div class="lbl">Sell-off หมดปี 2025</div><div class="val">${fmtN(summary.expiring_2025)}</div><div class="sub">ต้องตัดสินใจต่อสัญญา</div></div>
+      <div class="stat amber"><div class="lbl">Sell-off หมดปี ${summary.report_year ?? 2025}</div><div class="val">${fmtN(summary.expiring_2025)}</div><div class="sub">ต้องตัดสินใจต่อสัญญา</div></div>
     </div>
     <div class="g3">
       <div class="stat brand"><div class="lbl">ค่าลิขสิทธิ์รวม 2025</div><div class="val">${fmtB(summary.total_royalty_thb)}</div><div class="sub">คำนวณจากยอดขาย × ราคา × rate</div></div>

@@ -1,13 +1,29 @@
 import { useEffect, useState } from 'react'
 
-const FILE_SLOTS = [
-  { slot: 'item',    label: 'ยอดขาย-ลิขสิทธิ์' },
-  { slot: 'intra_1', label: 'Intra Annual — Western' },
-  { slot: 'intra_2', label: 'Intra Annual — Asia' },
-  { slot: 'intra_3', label: 'Intra BI-Annual — Western' },
-  { slot: 'intra_4', label: 'Intra BI-Annual — Asia' },
-  { slot: 'exchange', label: 'อัตราแลกเปลี่ยน' },
-]
+// ชุดข้อมูลมี 2 แบบ: โหมด item (6 ไฟล์) กับโหมดไฟล์ดิบ (9 ไฟล์) จึงไล่จาก
+// original_filenames ที่บันทึกไว้จริง แทนการ hardcode รายการเดียว
+const SLOT_LABELS = {
+  item:     'ยอดขาย-ลิขสิทธิ์',
+  databook: 'item (data book)',
+  acorp:    'ยอดขาย-ฝากขาย Acorp',
+  abook:    'ยอดขาย-ขายขาด Abook',
+  stock:    'Stock คงเหลือ (WH03)',
+  intra_1:  'Intra Annual — Western',
+  intra_2:  'Intra Annual — Asia',
+  intra_3:  'Intra BI-Annual — Western',
+  intra_4:  'Intra BI-Annual — Asia',
+  exchange: 'อัตราแลกเปลี่ยน',
+}
+const SLOT_ORDER = ['item', 'databook', 'acorp', 'abook', 'stock',
+                    'intra_1', 'intra_2', 'intra_3', 'intra_4', 'exchange']
+
+function slotsOf(ds) {
+  const names = ds.original_filenames || {}
+  const present = SLOT_ORDER.filter(s => names[s])
+  const known = present.length ? present : SLOT_ORDER.filter(s => s !== 'databook'
+    && s !== 'acorp' && s !== 'abook' && s !== 'stock')
+  return known.map(slot => ({ slot, label: SLOT_LABELS[slot] || slot }))
+}
 
 function fmtTs(slug) {
   if (!slug) return ''
@@ -165,9 +181,16 @@ function HistoryRow({ ds, reports, snapshots, onDeleteDataset, onDeleteReport, o
       <div className="grid grid-cols-2 divide-x divide-gray-100">
         {/* Left: source files */}
         <div className="p-4">
-          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide mb-3">ไฟล์ข้อมูล</p>
+          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide mb-3">
+            ไฟล์ข้อมูล
+            {ds.source === 'raw' && (
+              <span className="ml-1.5 font-medium normal-case tracking-normal text-brand">
+                · ไฟล์ดิบ {ds.year || ''}
+              </span>
+            )}
+          </p>
           <div className="space-y-1.5">
-            {FILE_SLOTS.map(({ slot, label }) => {
+            {slotsOf(ds).map(({ slot, label }) => {
               const origName = ds.original_filenames?.[slot]
               return (
                 <a
@@ -185,6 +208,17 @@ function HistoryRow({ ds, reports, snapshots, onDeleteDataset, onDeleteReport, o
               )
             })}
           </div>
+          {ds.source === 'raw' && (
+            <a
+              href={`/api/datasets/${ds.id}/files/item`}
+              download={`item_${ds.ts_slug || ds.id}.xlsx`}
+              className="mt-2.5 pt-2.5 border-t border-gray-50 flex items-center gap-2 text-xs text-gray-500 hover:text-brand transition-colors group"
+              title="ไฟล์ item master ที่ระบบประกอบจากไฟล์ดิบ — ใช้ตรวจตัวเลขก่อนออกรายงาน"
+            >
+              <span className="text-gray-300 group-hover:text-brand transition-colors">⬇</span>
+              <span className="font-medium">item ที่ระบบประกอบ</span>
+            </a>
+          )}
         </div>
 
         {/* Right: outputs */}
