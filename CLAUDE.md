@@ -15,7 +15,7 @@
 3. **รวมข้อมูลย้อนหลัง** (Step 2) — นำ output จาก 1 + 2 มา stack ตามปี → ZIP ฉบับสมบูรณ์
 
 **Working directory:** `/Users/sumate/Desktop/project/salereport`  
-**Version:** v0.51
+**Version:** v0.52
 
 ---
 
@@ -374,6 +374,16 @@ orphan ที่ไม่มีอัตราค่าลิขสิทธิ�
 พิมพ์ผิดค้างไว้เหมือนกันทั้ง databook และ abook (`9786161843757`, ขาย 357 เล่ม) ถ้า
 คัดทิ้งจะ join ไม่เจอทั้งที่ปัจจุบันทำงานได้เพราะสองฝั่งผิดตรงกัน
 
+### รอบสัญญา (Annual / Bi-Annual) — fallback ไป intra
+
+`generate_all()` แบ่งเล่มเข้ารอบด้วยคอลัมน์ `Annual/Bi-Annual` ของ databook **ถ้าเว้นว่าง
+ให้ยึด `Paidtype` ของสัญญาใน intra แทน** ไม่งั้นเล่มจะตกไปกอง annual ทั้งหมดโดยอัตโนมัติ
+(2026.1 มีเล่มที่มีสัญญาจริงแต่ databook ไม่กรอกทั้ง Agency และรอบ อยู่ 170 แถว ขายได้
+111,606 เล่ม — ในนั้นเป็นสัญญา Bi-Annual 10 แถว ที่หายจากรอบ BI ไปทั้งที่ควรอยู่)
+
+เล่มที่ Agency ว่างยังคงไปกอง `Direct Publisher` ตามเดิม (ยืนยันกับผู้ใช้แล้วว่ารับได้)
+ส่วน publisher ในไฟล์ยังเป็นชื่อจริงเพราะดึงจาก intra
+
 ### รายงาน "รหัสที่ระบบข้าม" — `scan_skipped_codes()`
 
 ปัญหาที่แท้จริงไม่ใช่ข้อมูลแปลก แต่คือ**ระบบทิ้งของเงียบๆ โดยไม่บอกใคร** เมธอดนี้เปิด
@@ -383,7 +393,7 @@ orphan ที่ไม่มีอัตราค่าลิขสิทธิ�
 | กอง | ความหมาย | ผลที่เกิด |
 |-----|----------|----------|
 | `bad_format` | รหัสไม่ใช่ 13 หลัก | ข้ามทิ้ง ไม่ขึ้นรายงาน |
-| `no_agency` | มีสัญญาใน intra + มียอดขาย แต่ databook ไม่กรอก Agency | ไปกอง Direct Publisher / ไม่ขึ้นรอบ BI |
+| `no_agency` | มีสัญญาใน intra + มียอดขาย แต่ databook ไม่กรอก Agency | ขึ้นใต้ Direct Publisher แทน agent จริง |
 | `no_contract` | รหัสใช้ได้ + มียอดขาย แต่ไม่มีใน intra | ขึ้นเป็น orphan ไม่มีอัตราค่าลิขสิทธิ์ |
 | `check_digit` | 13 หลักแต่ check digit ไม่ผ่าน | ยังใช้งานได้ — เตือนว่าน่าจะพิมพ์ผิด |
 
@@ -579,6 +589,7 @@ dataset เก่าที่ไม่มี `year` ใน meta → default `DEF
 
 | Version | รายละเอียด |
 |---------|----------|
+| v0.52 | `generate_all()` ยึด `Paidtype` ของ intra เมื่อ databook ไม่ได้กรอก Annual/Bi-Annual — เล่มที่มีสัญญาแต่ databook เว้นว่าง (170 แถว / 111,606 เล่ม) เคยตกไปรอบ annual หมด · ผลบน 2026.1 bi1: ไฟล์ 525 → 551, ยอดค่าลิขสิทธิ์ 2.60M → 3.17M บาท |
 | v0.51 | รหัสสินค้าใช้ `PRODUCT_CODE_RE` (13 หลัก ไม่ผูก prefix) แทน `978\d{10}` ที่กระจาย 6 จุด — boxset ที่ใช้ EAN `885878…` เคยหายทั้งกลุ่มโดยไม่มีไฟล์ orphan (2026.1 bi1: กลับมา 18 ไฟล์), `ean13_check_ok()` เป็นสัญญาณเตือนไม่ใช่ตัวคัดทิ้ง, `scan_skipped_codes()` + `GET /api/datasets/{id}/skipped-codes` + ส่วน "รหัสที่ระบบข้าม" ใน HistoryPanel + เก็บสรุปลง meta.json ตอนอัปโหลด |
 | v0.50 | แก้ ROYALTY RATE ว่างทั้งรายงานของชุดไฟล์ดิบ: `intra_flat_rate()` fallback ไปคอลัมน์ `Royalty` ของ intra ต่อจาก rt tier, `flat_rate_for_isbn()` ให้ dashboard, `_init_intra_cols()` กวาด ISBN ทุกแถว (เดิม 200 แถวแรก → BookTH05–10 หลุด) · ผลบน 2026.1 bi1: แถวยอดขายที่ rate ว่าง 266 → 131 (ที่เหลือคือ ISBN ที่ไม่มีในไฟล์ intra), ยอดค่าลิขสิทธิ์รวม 362K → 2.60M บาท, ไฟล์ 525 → 507 (orphan ยุบเข้าสัญญาจริง) |
 | v0.49 | `archive_report_as_legacy()` + `POST /api/legacy/from-report` + ปุ่มใน MergePanel — เก็บ report ที่ generate แล้วเข้า legacy pack (ปี 2025 เคยหายจาก merged เพราะ DataSale มีถึง 2024), HistoryPanel แสดงไฟล์ครบตาม slot จริงของแต่ละ dataset, `convert_datasale_folder()` ข้ามโฟลเดอร์ที่มี `.skip_legacy_convert` |

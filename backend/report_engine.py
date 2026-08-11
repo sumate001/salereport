@@ -593,8 +593,8 @@ class ReportEngine:
 
           bad_format   รหัสไม่ใช่ 13 หลัก → `PRODUCT_CODE_RE` ไม่รับ ระบบข้ามแน่นอน
           no_agency    มีสัญญาใน intra + มียอดขาย แต่ databook ไม่ได้กรอก Agency →
-                       เล่มไปกอง 'Direct Publisher' แทน agent จริง และถ้าไม่ได้กรอก
-                       Annual/Bi-Annual ด้วยจะไม่ขึ้นรอบ bi1/bi2 เลย
+                       เล่มไปกอง 'Direct Publisher' แทน agent จริง (ยังขึ้นรายงานปกติ
+                       รอบสัญญายึดตาม Paidtype ของ intra — ดู generate_all)
           no_contract  รหัสใช้ได้ + มียอดขาย แต่ไม่มีในไฟล์ intra → ไม่มีสัญญาให้อ้างอิง
                        (ขึ้นรายงานเป็นไฟล์ orphan แต่ไม่มีอัตราค่าลิขสิทธิ์/advance)
           check_digit  13 หลักแต่หลักตรวจสอบ EAN-13 ไม่ผ่าน → ยังทำรายงานได้ตามปกติ
@@ -655,7 +655,7 @@ class ReportEngine:
         labels = {
             'bad_format':  ('รหัสไม่ใช่ 13 หลัก', 'ระบบข้ามทิ้ง ไม่ขึ้นรายงาน', 'drop'),
             'no_agency':   ('มีสัญญาแต่ databook ไม่ได้กรอก Agency',
-                            'ไปกอง Direct Publisher / ไม่ขึ้นรอบ BI', 'drop'),
+                            'ขึ้นรายงานใต้ Direct Publisher แทน agent จริง', 'warn'),
             'no_contract': ('ไม่มีสัญญาในไฟล์ intra', 'ขึ้นรายงานแต่ไม่มีอัตราค่าลิขสิทธิ์', 'warn'),
             'check_digit': ('หลักตรวจสอบ EAN-13 ไม่ผ่าน', 'ยังใช้งานได้ — น่าจะพิมพ์ผิด', 'info'),
         }
@@ -1163,6 +1163,7 @@ class ReportEngine:
                 'publisher':          safe_str(intra_row.iloc[IntraCol.PUBLISHER]),
                 'intermediate_agent': safe_str(intra_row.iloc[IntraCol.AGENT]),
                 'contract_expiry':    contract_expiry,
+                'paidtype':           safe_str(intra_row.iloc[IntraCol.PAIDTYPE]),
             })
             agent_val = safe_str(intra_row.iloc[IntraCol.AGENT])
             pub_val   = safe_str(intra_row.iloc[IntraCol.PUBLISHER])
@@ -1226,7 +1227,13 @@ class ReportEngine:
                 pub_dir  = os.path.join(agency_dir, safe_pub)
                 os.makedirs(pub_dir, exist_ok=True)
 
+                # รอบสัญญา: ใช้ค่าที่ databook กรอกไว้ก่อน ถ้าเว้นว่างให้ยึด Paidtype
+                # ของสัญญาแทน — ชุด 2026.1 มีเล่มที่มีสัญญาจริงแต่ databook ไม่ได้กรอก
+                # ทั้ง Agency และ Annual/Bi-Annual อยู่ 170 แถว (ขายได้ 111,606 เล่ม)
+                # ถ้าไม่ fallback เล่มพวกนี้จะตกไปอยู่รอบ annual หมดและหายจากรอบ BI
                 type_col = self._clean(contract_items.iloc[:, ItemCol.ANNUAL_BI])
+                blank    = type_col.str.strip().str.lower().isin(['', 'nan'])
+                type_col = type_col.mask(blank, c['paidtype'])
                 bi_mask  = type_col.str.upper().str.contains('BI')
 
                 bi1_rows = self._build_rows(contract_items[bi_mask],  'bi1')    if period in ('all', 'bi1')    else []
