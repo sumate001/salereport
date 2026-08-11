@@ -24,7 +24,7 @@
 import re
 import pandas as pd
 
-from report_engine import ItemCol
+from report_engine import ItemCol, PRODUCT_CODE_RE
 
 
 # จำนวนคอลัมน์ของ item frame — ต้องกว้างพอสำหรับ ItemCol ที่ index สูงสุด
@@ -210,7 +210,6 @@ def read_intra_advance(intra_paths) -> pd.DataFrame:
     intra = pd.concat(frames, ignore_index=True)
 
     # คอลัมน์ BookTH01–10 เก็บเป็น "9789748491721 ชื่อหนังสือ" — ISBN แล้วตามด้วยชื่อ
-    isbn_re = re.compile(r"^'?(97[89]\d{10})")
     rows = {}
     for _, row in intra.iterrows():
         raw = row.iloc[IntraCol.ADV_PAY] if IntraCol.ADV_PAY < len(row) else None
@@ -230,7 +229,7 @@ def read_intra_advance(intra_paths) -> pd.DataFrame:
         for cell in row:
             if cell is None or (isinstance(cell, float) and cell != cell):
                 continue
-            m2 = isbn_re.match(str(cell).strip())
+            m2 = PRODUCT_CODE_RE.match(str(cell).strip())
             if m2 and m2.group(1) not in rows:
                 rows[m2.group(1)] = (adv_val, cur)
 

@@ -43,6 +43,33 @@ class ItemCol:
     STATUS_ANNUAL    = 81   # สถานะ 2025
 
 
+# รหัสสินค้าบนปกเป็น EAN-13 เสมอ → ตรวจแค่ "13 หลัก" ห้ามผูกกับ prefix
+#
+# ของเดิมเขียนเป็น `978\d{10}` ซึ่งใช้ได้ตอนที่ input มีแต่หนังสือเล่มเดี่ยว พอชุดไฟล์ดิบ
+# มี boxset / gift box ที่ใช้ EAN ไทย `885878…` (ในไฟล์ช่องนี้ยังชื่อ "ISBN" อยู่) ของ
+# กลุ่มนั้นถูกทิ้งเงียบๆ ทั้งตอน map สัญญาและตอนวน item — prefix ใหม่ในอนาคตจะใช้ได้
+# ทันทีโดยไม่ต้องแก้โค้ด ส่วนของที่หลุด pattern นี้ดูได้จาก scan_skipped_codes()
+#
+# ใช้ .match() เสมอ (ไม่ใช่ .search()) เพราะช่อง BookTH ของ intra เก็บเป็น
+# "9789748491721 ชื่อหนังสือ" — ต้องตัดเฉพาะรหัสที่อยู่หน้าสุด
+PRODUCT_CODE_RE = re.compile(r"'?(\d{13})")
+
+
+def ean13_check_ok(code) -> bool:
+    """ตรวจหลักตรวจสอบของ EAN-13
+
+    ใช้เป็น **สัญญาณเตือน** เท่านั้น ห้ามเอามาคัดทิ้ง — พบรหัสที่ต้นทางพิมพ์ผิดค้างไว้
+    เหมือนกันทั้งไฟล์ databook และ abook (เช่น 9786161843757 ที่มียอดขาย 357 เล่ม)
+    ถ้าตัดทิ้งจะ join ไม่เจอทั้งที่ปัจจุบันทำงานได้ปกติเพราะสองฝั่งผิดตรงกัน
+    """
+    s = safe_str(code)
+    if not re.fullmatch(r'\d{13}', s):
+        return False
+    digits = [int(c) for c in s]
+    check = (10 - sum(d * (1 if i % 2 == 0 else 3) for i, d in enumerate(digits[:12])) % 10) % 10
+    return check == digits[12]
+
+
 # Canonical column order for the intra frame. Every intra file is re-indexed onto
 # this layout by header name at load time (see ReportEngine.intra), so IntraCol
 # indices stay valid no matter how the source file orders or renames its columns.
@@ -175,6 +202,19 @@ def safe_str(val):
 def normalize_rate(rate):
     r = safe_float(rate)
     return r / 100 if r > 1 else r
+
+
+def intra_flat_rate(intra_row):
+    """อัตราค่าลิขสิทธิ์แบบ flat จากคอลัมน์ `Royalty` ของ intra (ไฟล์จริง = คอลัมน์ O)
+
+    ใช้เมื่อไม่มีอัตราในไฟล์ item และสัญญาไม่ได้กรอก rt tier ไว้ — ซึ่งเป็นกรณีปกติ
+    ของชุดข้อมูลไฟล์ดิบ (2026.1: 2,884 สัญญากรอก Royalty แบบ flat / กรอก rt tier
+    แค่ 293 จากทั้งหมด 3,190) ถ้าไม่ fallback มาที่นี่ ช่อง ROYALTY RATE จะว่าง
+    แล้ว AMOUNT (THB) กลายเป็น 0 ทั้งรายงาน
+    """
+    if intra_row is None or IntraCol.ROYALTY >= len(intra_row):
+        return 0.0
+    return normalize_rate(intra_row.iloc[IntraCol.ROYALTY])
 
 
 def format_date_printed(val):
@@ -340,6 +380,7 @@ class ReportEngine:
         self._intra_isbn_col  = -1
         self._intra_isbn_cols = []
         self._intra_cols_init = False
+        self._flat_rates      = None   # ISBN → อัตรา flat จาก intra (ดู flat_rate_for_isbn)
 
     # ── Lazy loaders ──────────────────────────────────────────────────────────
 
@@ -397,7 +438,7 @@ class ReportEngine:
             isbns = []
             for isbn_col in self._intra_isbn_cols:
                 val = safe_str(intra_row.iloc[isbn_col]).strip()
-                m = re.match(r'(978\d{10})', val)
+                m = PRODUCT_CODE_RE.match(val)
                 if m:
                     isbn_val = m.group(1)
                     if isbn_val not in isbns:
@@ -424,7 +465,7 @@ class ReportEngine:
 
         for _, row in self.item.iterrows():
             isbn = safe_str(row.iloc[ItemCol.ISBN])
-            if not isbn or not re.match(r'978\d{10}', isbn):
+            if not isbn or not PRODUCT_CODE_RE.match(isbn):
                 continue
             title_th = strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_TH]))
             title_en = strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_EN]))
@@ -499,14 +540,143 @@ class ReportEngine:
         if self._intra_cols_init:
             return
         self._intra_cols_init = True
-        n_sample = min(200, self.intra.shape[0])
+        # ต้องกวาดทุกแถว — ของเดิมดูแค่ 200 แถวแรก ทำให้ BookTH05–10 ไม่ถูกนับเป็น
+        # คอลัมน์ ISBN (คอลัมน์ท้ายๆ มี ISBN แค่หลักสิบแถวและอยู่ลึกในไฟล์) เล่มที่ ISBN
+        # ไปตกอยู่คอลัมน์เหล่านั้นจึงหาสัญญาไม่เจอ → ออกรายงานแบบ orphan ไม่มีอัตรา
+        # ค่าลิขสิทธิ์/advance และ agent ผิด (ชุด 2026.1: 185 ISBN)
         for c in range(self.intra.shape[1]):
-            sample = self._clean(self.intra.iloc[:n_sample, c]).tolist()
-            if any(re.match(r'\d{2}/[A-Z]', s) or s.startswith('EB/') for s in sample):
+            col = self._clean(self.intra.iloc[:, c])
+            if col.str.match(r'\d{2}/[A-Z]').any() or col.str.startswith('EB/').any():
                 self._intra_job_col = c
-            if any(re.match(r'978\d{10}', s) for s in sample):
+            if col.str.match(r"'?\d{13}").any():
                 self._intra_isbn_cols.append(c)
         self._intra_isbn_col = self._intra_isbn_cols[0] if self._intra_isbn_cols else -1
+
+    def flat_rate_for_isbn(self, isbn: str) -> float:
+        """อัตรา flat (`Royalty`) ต่อ ISBN — สำหรับที่ที่เรียก per-row จนใช้ _find_intra_row ไม่ไหว
+
+        dashboard วนทุกแถวของ item (หลักหมื่น) การหา intra row ทีละแถวช้าเกินไป
+        จึงกวาด intra รอบเดียวแล้ว cache ไว้ ใช้ rt tier ก่อนถ้าสัญญามีกรอกไว้
+        """
+        if self._flat_rates is None:
+            self._init_intra_cols()
+            rates = {}
+            for _, row in self.intra.iterrows():
+                tiers = parse_rt_tiers(row)
+                rate  = tiers[0][2] if tiers else intra_flat_rate(row)
+                if not rate:
+                    continue
+                for c in self._intra_isbn_cols:
+                    m = PRODUCT_CODE_RE.match(safe_str(row.iloc[c]))
+                    if m and m.group(1) not in rates:
+                        rates[m.group(1)] = rate
+            self._flat_rates = rates
+        return self._flat_rates.get(safe_str(isbn), 0.0)
+
+    def intra_codes(self) -> set:
+        """รหัสสินค้าทุกตัวที่ลงทะเบียนไว้ในไฟล์ intra (คอลัมน์ BookTH01–10)"""
+        self._init_intra_cols()
+        codes = set()
+        for c in self._intra_isbn_cols:
+            for v in self.intra.iloc[:, c]:
+                m = PRODUCT_CODE_RE.match(safe_str(v).strip())
+                if m:
+                    codes.add(m.group(1))
+        return codes
+
+    def scan_skipped_codes(self, period: str = 'bi1', sample: int = 15) -> dict:
+        """รายงาน "รหัสที่ระบบข้าม" — ของที่หลุดจากรายงาน พร้อมเหตุผลและจำนวนเล่มที่ขายได้
+
+        มีไว้ให้ข้อมูลแปลกๆ โผล่ขึ้นหน้าจอเองตั้งแต่ตอนอัปโหลด แทนที่จะรอให้เจ้าของ
+        ลิขสิทธิ์ทักมาว่ายอดไม่ตรง (เคสจริง: boxset ที่ใช้ EAN `885878…` หายทั้งกลุ่ม
+        โดยไม่มีอะไรเตือน) 4 กอง เรียงตามความรุนแรง
+
+          bad_format   รหัสไม่ใช่ 13 หลัก → `PRODUCT_CODE_RE` ไม่รับ ระบบข้ามแน่นอน
+          no_agency    มีสัญญาใน intra + มียอดขาย แต่ databook ไม่ได้กรอก Agency →
+                       เล่มไปกอง 'Direct Publisher' แทน agent จริง และถ้าไม่ได้กรอก
+                       Annual/Bi-Annual ด้วยจะไม่ขึ้นรอบ bi1/bi2 เลย
+          no_contract  รหัสใช้ได้ + มียอดขาย แต่ไม่มีในไฟล์ intra → ไม่มีสัญญาให้อ้างอิง
+                       (ขึ้นรายงานเป็นไฟล์ orphan แต่ไม่มีอัตราค่าลิขสิทธิ์/advance)
+          check_digit  13 หลักแต่หลักตรวจสอบ EAN-13 ไม่ผ่าน → ยังทำรายงานได้ตามปกติ
+                       เป็นแค่สัญญาณว่าต้นทางน่าจะพิมพ์ผิด (ดู ean13_check_ok)
+
+        เล่มที่ไม่มีทั้ง Agency และสัญญาถูกข้ามไป — ไฟล์ databook มีหนังสือของ Amarin เอง
+        ปนมาสองในสามของแถว ถ้านับด้วยรายงานนี้จะกลายเป็นรายการหนังสือทั่วไปหลักพัน
+        """
+        sold_cols = {
+            'bi1':    (ItemCol.BI_H1_AMARIN, ItemCol.BI_H1_ABOOK),
+            'bi2':    (ItemCol.BI_H2_AMARIN, ItemCol.BI_H2_ABOOK),
+            'annual': (ItemCol.ANNUAL_SOLD,),
+        }.get(period, (ItemCol.BI_H1_AMARIN, ItemCol.BI_H1_ABOOK))
+
+        known   = self.intra_codes()
+        order   = ('bad_format', 'no_agency', 'no_contract', 'check_digit')
+        buckets = {k: {'rows': [], 'codes': set()} for k in order}
+
+        for _, row in self.item.iterrows():
+            code   = safe_str(row.iloc[ItemCol.ISBN]).strip()
+            agency = safe_str(row.iloc[ItemCol.AGENCY])
+            if agency.lower() == 'nan':
+                agency = ''
+            sold   = sum(safe_float(row.iloc[c]) for c in sold_cols)
+            m      = PRODUCT_CODE_RE.match(code)
+
+            if not m:
+                if not agency:
+                    continue
+                key = 'bad_format'
+            else:
+                code = m.group(1)
+                has_contract = code in known
+                if not agency:
+                    if not (has_contract and sold > 0):
+                        continue
+                    key = 'no_agency'
+                elif sold > 0 and not has_contract:
+                    key = 'no_contract'
+                elif not ean13_check_ok(code):
+                    key = 'check_digit'
+                else:
+                    continue
+
+            buckets[key]['codes'].add(code)
+            buckets[key]['rows'].append({
+                'job':         safe_str(row.iloc[ItemCol.JOB]),
+                'code':        code,
+                'title':       (strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_TH]))
+                                or strip_reprint_suffix(safe_str(row.iloc[ItemCol.TITLE_EN]))),
+                'agency':      agency,
+                # รอบของสัญญา — ไฟล์ bi1/bi2 ออกเฉพาะ BI ส่วน annual ออกที่เหลือ
+                # ตัวเลขนี้บอกว่ารายการนั้นจะไปโผล่ตอน generate รอบไหน
+                'paidtype':    safe_str(row.iloc[ItemCol.ANNUAL_BI]),
+                'copies_sold': int(sold),
+            })
+
+        labels = {
+            'bad_format':  ('รหัสไม่ใช่ 13 หลัก', 'ระบบข้ามทิ้ง ไม่ขึ้นรายงาน', 'drop'),
+            'no_agency':   ('มีสัญญาแต่ databook ไม่ได้กรอก Agency',
+                            'ไปกอง Direct Publisher / ไม่ขึ้นรอบ BI', 'drop'),
+            'no_contract': ('ไม่มีสัญญาในไฟล์ intra', 'ขึ้นรายงานแต่ไม่มีอัตราค่าลิขสิทธิ์', 'warn'),
+            'check_digit': ('หลักตรวจสอบ EAN-13 ไม่ผ่าน', 'ยังใช้งานได้ — น่าจะพิมพ์ผิด', 'info'),
+        }
+        return {
+            'period':     period,
+            'item_rows':  int(len(self.item)),
+            'intra_codes': len(known),
+            'buckets': [
+                {
+                    'id':          key,
+                    'label':       labels[key][0],
+                    'effect':      labels[key][1],
+                    'severity':    labels[key][2],
+                    'codes':       len(b['codes']),
+                    'rows':        len(b['rows']),
+                    'copies_sold': int(sum(r['copies_sold'] for r in b['rows'])),
+                    'samples':     sorted(b['rows'], key=lambda r: -r['copies_sold'])[:sample],
+                }
+                for key, b in ((k, buckets[k]) for k in order)
+            ],
+        }
 
     def _find_intra_row(self, item_row):
         self._init_intra_cols()
@@ -615,6 +785,9 @@ class ReportEngine:
             # If item file has no rate but intra tiers do, use first tier rate as fallback
             if not fallback_rate and tiers:
                 fallback_rate = tiers[0][2]
+            # ยังไม่ได้อัตราอีก → ใช้ `Royalty` แบบ flat ของ intra เป็นด่านสุดท้าย
+            if not fallback_rate:
+                fallback_rate = intra_flat_rate(intra_row)
 
             # E-book net receipt (stored as negative; abs = royalty amount in payment currency)
             if is_ebook:
@@ -973,7 +1146,7 @@ class ReportEngine:
             isbns = []
             for isbn_col in self._intra_isbn_cols:
                 val = safe_str(intra_row.iloc[isbn_col]).strip()
-                m = re.match(r'(978\d{10})', val)
+                m = PRODUCT_CODE_RE.match(val)
                 if m:
                     isbn_val = m.group(1)
                     if isbn_val not in isbns:
@@ -1032,7 +1205,7 @@ class ReportEngine:
             orphan_isbns = []
 
             for isbn in sorted(isbn_series.unique()):
-                if not isbn or not re.match(r'978\d{10}', isbn):
+                if not isbn or not PRODUCT_CODE_RE.match(isbn):
                     continue
                 if isbn_set and isbn not in isbn_set:
                     continue
@@ -1165,7 +1338,7 @@ class ReportEngine:
 
             copies_printed = safe_float(row.iloc[ItemCol.COPIES_PRINTED])
             retail         = safe_float(row.iloc[ItemCol.PRICE])
-            rate           = normalize_rate(row.iloc[ItemCol.ROYALTY_RATE])
+            rate           = normalize_rate(row.iloc[ItemCol.ROYALTY_RATE]) or self.flat_rate_for_isbn(isbn)
             royalty_thb    = copies_sold * retail * rate
             status_2024    = safe_str(row.iloc[ItemCol.STATUS_2024])
             prev_balance   = safe_float(row.iloc[ItemCol.PREV_BALANCE])

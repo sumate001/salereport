@@ -15,7 +15,7 @@
 3. **รวมข้อมูลย้อนหลัง** (Step 2) — นำ output จาก 1 + 2 มา stack ตามปี → ZIP ฉบับสมบูรณ์
 
 **Working directory:** `/Users/sumate/Desktop/project/salereport`  
-**Version:** v0.49
+**Version:** v0.51
 
 ---
 
@@ -129,8 +129,13 @@ join ด้วย ISBN เพราะ intra ไม่มีคอลัมน�
 `"9789748491721 ชื่อหนังสือ"` (ISBN แล้วตามด้วยชื่อ) ต้อง match แบบ prefix
 · ครอบคลุม 67% ของเล่มที่ขึ้น report (ไฟล์ item 2025 มีแค่ 20%)
 
-**Rate Royalty** ไม่มีในไฟล์ databook แล้ว — `_build_rows()` fallback ไปใช้ rt tier
-ของ intra ให้อยู่แล้ว จึงเว้นว่างไว้
+**Rate Royalty** ไม่มีในไฟล์ databook แล้ว — `_build_rows()` fallback ไป intra ตามลำดับ
+**rt tier (rt1–rt5) → `Royalty` แบบ flat** (`intra_flat_rate()`) จึงเว้นว่างในไฟล์ item ได้
+
+> ก่อน v0.50 fallback มีแค่ rt tier ซึ่งชุด 2026.1 กรอกไว้แค่ 293 สัญญาจาก 3,190
+> (อีก 2,881 กรอกแต่ `Royalty` แบบ flat) → ช่อง ROYALTY RATE ว่าง 79% ของแถวที่มี
+> ยอดขาย แล้ว AMOUNT (THB) เป็น 0 ทั้งรายงาน (เอกสาร Discover ระบุไว้ว่าช่องนี้มาจาก
+> intra **คอลัมน์ O–Y** = `Royalty` + rt1–rt5 ไม่ใช่ rt อย่างเดียว)
 
 **ยอดขาย Abook นับซ้ำไม่ได้:** ไฟล์ Abook ให้ยอดต่อ ISBN แต่ ISBN เดียวใช้ซ้ำได้ทุก
 print-run (พบสูงสุด 44 เลขงาน/ISBN) → `_abook_sold_per_job()` ลงยอดที่ occurrence
@@ -186,6 +191,7 @@ cd frontend && npm run dev
 | `GET` | `/api/datasets/{id}/books?q=` | ค้นหาชื่อหนังสือ |
 | `GET` | `/api/datasets/{id}/agencies?q=` | ค้นหาชื่อ Agent |
 | `GET` | `/api/datasets/{id}/files/{slot}` | Download ไฟล์ต้นฉบับ |
+| `GET` | `/api/datasets/{id}/skipped-codes?period=` | รหัสที่ระบบข้าม 4 กอง (ดู `scan_skipped_codes()`) |
 
 ### Generate (Step 1)
 | Method | Path | Body |
@@ -339,6 +345,50 @@ Col N  (PERIOD BAL)   = =L{r}-(I10+I12+...)+M{r}
 - `rt_text "a3001"` → เล่ม 3,001 ขึ้นไป
 - `rt_text "a"` หรือ rate=0 → skip
 - ระบบ split copies_sold ตามช่วงของแต่ละ run โดยอัตโนมัติ
+- ไม่มี tier เลย → ใช้ `Royalty` แบบ flat ของ intra (`intra_flat_rate()`)
+
+**ลำดับการหาอัตรา** ใน `_build_rows()`: `ItemCol.ROYALTY_RATE` → rt tier แรกของ intra
+→ `IntraCol.ROYALTY` · dashboard ใช้ `flat_rate_for_isbn()` (cache ทั้งไฟล์รอบเดียว
+เพราะวน item หลักหมื่นแถว จะเรียก `_find_intra_row()` รายแถวไม่ไหว)
+
+### การหาคอลัมน์ ISBN ใน intra
+
+`_init_intra_cols()` ตรวจว่าคอลัมน์ไหนเก็บ ISBN จาก**เนื้อข้อมูลทุกแถว** — ห้ามกลับไป
+sample แค่ N แถวแรก คอลัมน์ BookTH05–10 มี ISBN แค่หลักสิบแถวและกระจายอยู่ลึกในไฟล์
+(2026.1: BookTH10 มี 9 แถว) การ sample 200 แถวแรกทำให้ตรวจเจอแค่ BookTH01–04 →
+เล่มที่ ISBN ไปตกคอลัมน์หลังจากนั้น (185 ISBN) หาสัญญาไม่เจอ ระบบจึงออกเป็นไฟล์
+orphan ที่ไม่มีอัตราค่าลิขสิทธิ์/advance และจัดกลุ่ม agent/publisher ผิด
+
+### รหัสสินค้า (ISBN / barcode) — `PRODUCT_CODE_RE`
+
+ช่องที่ทุกไฟล์เรียกว่า "ISBN" จริงๆ คือ **บาร์โค้ด EAN-13 บนปก** และเป็นเลขชุดเดียวกัน
+ทุกไฟล์ (abook Barcode ตรงกับ databook ISBN 97.9%) มี 2 แบบปนกัน — `978/979` หนังสือ
+เล่มเดี่ยว · `885878…` boxset / gift box ที่ไม่ได้ขอ ISBN
+
+**กติกา: ตรวจแค่ "13 หลัก" ห้ามผูกกับ prefix** — ใช้ `PRODUCT_CODE_RE` ตัวเดียวทุกที่
+(6 จุดใน report_engine + read_intra_advance) prefix ใหม่ในอนาคตจะใช้ได้ทันทีโดยไม่ต้อง
+แก้โค้ด · ของเดิมเขียน `978\d{10}` กระจาย 6 จุด ทำให้ boxset ที่มีสัญญาจริงถูกทิ้ง
+ทั้งตอน map สัญญาและตอนวน item (ไม่ออกแม้แต่ไฟล์ orphan)
+
+`ean13_check_ok()` ใช้เป็น**สัญญาณเตือนเท่านั้น ห้ามเอามาคัดทิ้ง** — พบรหัสที่ต้นทาง
+พิมพ์ผิดค้างไว้เหมือนกันทั้ง databook และ abook (`9786161843757`, ขาย 357 เล่ม) ถ้า
+คัดทิ้งจะ join ไม่เจอทั้งที่ปัจจุบันทำงานได้เพราะสองฝั่งผิดตรงกัน
+
+### รายงาน "รหัสที่ระบบข้าม" — `scan_skipped_codes()`
+
+ปัญหาที่แท้จริงไม่ใช่ข้อมูลแปลก แต่คือ**ระบบทิ้งของเงียบๆ โดยไม่บอกใคร** เมธอดนี้เปิด
+ให้เห็น 4 กอง (เรียกผ่าน `GET /api/datasets/{id}/skipped-codes` · แสดงใน HistoryPanel ·
+สรุปแบบไม่มีตัวอย่างถูกเก็บลง `meta.json` → `skipped_codes` ตอนอัปโหลดไฟล์ดิบ)
+
+| กอง | ความหมาย | ผลที่เกิด |
+|-----|----------|----------|
+| `bad_format` | รหัสไม่ใช่ 13 หลัก | ข้ามทิ้ง ไม่ขึ้นรายงาน |
+| `no_agency` | มีสัญญาใน intra + มียอดขาย แต่ databook ไม่กรอก Agency | ไปกอง Direct Publisher / ไม่ขึ้นรอบ BI |
+| `no_contract` | รหัสใช้ได้ + มียอดขาย แต่ไม่มีใน intra | ขึ้นเป็น orphan ไม่มีอัตราค่าลิขสิทธิ์ |
+| `check_digit` | 13 หลักแต่ check digit ไม่ผ่าน | ยังใช้งานได้ — เตือนว่าน่าจะพิมพ์ผิด |
+
+แถวที่ไม่มีทั้ง Agency และสัญญาถูกข้าม — databook มีหนังสือของ Amarin เองปนมา 2 ใน 3
+ของแถว ถ้านับด้วยจะกลายเป็นรายการหนังสือทั่วไปหลักพันจนหาของที่ผิดจริงไม่เจอ
 
 ### E-Book
 - JOB ขึ้นต้น `EB/` = E-Book
@@ -529,6 +579,8 @@ dataset เก่าที่ไม่มี `year` ใน meta → default `DEF
 
 | Version | รายละเอียด |
 |---------|----------|
+| v0.51 | รหัสสินค้าใช้ `PRODUCT_CODE_RE` (13 หลัก ไม่ผูก prefix) แทน `978\d{10}` ที่กระจาย 6 จุด — boxset ที่ใช้ EAN `885878…` เคยหายทั้งกลุ่มโดยไม่มีไฟล์ orphan (2026.1 bi1: กลับมา 18 ไฟล์), `ean13_check_ok()` เป็นสัญญาณเตือนไม่ใช่ตัวคัดทิ้ง, `scan_skipped_codes()` + `GET /api/datasets/{id}/skipped-codes` + ส่วน "รหัสที่ระบบข้าม" ใน HistoryPanel + เก็บสรุปลง meta.json ตอนอัปโหลด |
+| v0.50 | แก้ ROYALTY RATE ว่างทั้งรายงานของชุดไฟล์ดิบ: `intra_flat_rate()` fallback ไปคอลัมน์ `Royalty` ของ intra ต่อจาก rt tier, `flat_rate_for_isbn()` ให้ dashboard, `_init_intra_cols()` กวาด ISBN ทุกแถว (เดิม 200 แถวแรก → BookTH05–10 หลุด) · ผลบน 2026.1 bi1: แถวยอดขายที่ rate ว่าง 266 → 131 (ที่เหลือคือ ISBN ที่ไม่มีในไฟล์ intra), ยอดค่าลิขสิทธิ์รวม 362K → 2.60M บาท, ไฟล์ 525 → 507 (orphan ยุบเข้าสัญญาจริง) |
 | v0.49 | `archive_report_as_legacy()` + `POST /api/legacy/from-report` + ปุ่มใน MergePanel — เก็บ report ที่ generate แล้วเข้า legacy pack (ปี 2025 เคยหายจาก merged เพราะ DataSale มีถึง 2024), HistoryPanel แสดงไฟล์ครบตาม slot จริงของแต่ละ dataset, `convert_datasale_folder()` ข้ามโฟลเดอร์ที่มี `.skip_legacy_convert` |
 | v0.48 | เปลี่ยน databook slot เป็นไฟล์ `item (data book).xlsx`: col D ใช้ `ยอดผลิตรายงานเมืองนอก` (เดิมใช้ `Job quantity` = ยอดพิมพ์จริง ซึ่งผิด), ราคาปกใช้ `ราคาขาย`, เพิ่ม `read_intra_advance()` ดึง advance + สกุลเงินจาก AdvPay ของ intra |
 | v0.47 | รองรับชุดข้อมูล 2026.1 ที่ไม่มีไฟล์ item: `item_builder.py` + `POST /api/datasets/raw` + โหมดอัปโหลดใน UploadPanel, `read_intra_file()` map คอลัมน์ intra ด้วยชื่อหัวตาราง (แก้ off-by-one EXP_DATE/SELL_OFF ที่มีมาแต่เดิม), ปี report เป็น parameter ทั้งระบบ (`ExchangeCol.quarter()`, `period_end_label()`, `period_label()`, `periodsFor()`) |

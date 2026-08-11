@@ -220,6 +220,9 @@ async def create_dataset_from_raw(
             year=year,
         )
         engine.get_countries()
+        # สรุป "รหัสที่ระบบข้าม" ติดไว้กับ dataset ตั้งแต่ตอนอัปโหลด — รายละเอียดเต็ม
+        # (พร้อมตัวอย่างรายการ) ดึงทีหลังได้จาก GET /api/datasets/{id}/skipped-codes
+        skipped = engine.scan_skipped_codes(period, sample=0)
     except Exception as e:
         shutil.rmtree(ds_dir, ignore_errors=True)
         raise HTTPException(400, f"ประกอบข้อมูลจากไฟล์ดิบไม่สำเร็จ: {e}")
@@ -235,6 +238,7 @@ async def create_dataset_from_raw(
         "source":             "raw",
         "build_period":       period,
         "build_stats":        stats,
+        "skipped_codes":      skipped,
     }
     (ds_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
@@ -251,7 +255,7 @@ async def create_dataset_from_raw(
     }
 
     return {"dataset_id": did, "label": label, "ts_slug": meta["ts_slug"],
-            "year": year, "period": period, "stats": stats}
+            "year": year, "period": period, "stats": stats, "skipped_codes": skipped}
 
 
 @app.get("/api/datasets")
@@ -319,6 +323,20 @@ def list_agencies(dataset_id: str, q: str = Query(default="")):
     except Exception as e:
         raise HTTPException(500, f"ค้นหา agent ล้มเหลว: {e}")
     return {"agencies": agencies[:50]}
+
+
+@app.get("/api/datasets/{dataset_id}/skipped-codes")
+def skipped_codes(dataset_id: str, period: str = ""):
+    """รหัสสินค้าที่ระบบข้าม/ต้องระวัง ของ dataset นี้ — ดู ReportEngine.scan_skipped_codes"""
+    ds_dir = DATASETS_DIR / dataset_id
+    if not (ds_dir / "meta.json").exists():
+        raise HTTPException(404, "ไม่พบ dataset")
+    meta = json.loads((ds_dir / "meta.json").read_text(encoding="utf-8"))
+    s = _ensure_session(dataset_id)
+    try:
+        return _engine(s).scan_skipped_codes(period or meta.get("build_period", "bi1"))
+    except Exception as e:
+        raise HTTPException(500, f"ตรวจรหัสสินค้าไม่สำเร็จ: {e}")
 
 
 @app.get("/api/datasets/{dataset_id}/files/{slot}")

@@ -129,6 +129,94 @@ function OutputList({ reports, snapshots, onDeleteReport, onDeleteSnap }) {
   )
 }
 
+// ── รหัสที่ระบบข้าม ───────────────────────────────────────────────────────────
+// เปิดให้เห็นตั้งแต่หน้าประวัติว่า dataset นี้มีของที่หลุดจากรายงานกี่รายการ ไม่ต้องรอ
+// ให้เจ้าของลิขสิทธิ์ทักมาว่ายอดไม่ตรง (เคสจริง: boxset ที่ใช้ EAN 885878… หายทั้งกลุ่ม)
+
+const SEVERITY = {
+  drop: { dot: 'bg-red-400',    text: 'text-red-600'    },
+  warn: { dot: 'bg-amber-400',  text: 'text-amber-600'  },
+  info: { dot: 'bg-gray-300',   text: 'text-gray-500'   },
+}
+
+function SkippedCodes({ datasetId }) {
+  const [open, setOpen]   = useState(false)
+  const [data, setData]   = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open || data || error) return
+    fetch(`/api/datasets/${datasetId}/skipped-codes`)
+      .then(r => r.ok ? r.json() : r.json().then(d => Promise.reject(d.detail || 'ตรวจไม่สำเร็จ')))
+      .then(setData)
+      .catch(e => setError(String(e)))
+  }, [open, datasetId, data, error])
+
+  const buckets = data?.buckets || []
+  const totalRows = buckets.reduce((n, b) => n + b.rows, 0)
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-gray-50">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-brand transition-colors"
+        title="รหัสสินค้าที่ระบบข้ามหรือหาสัญญาไม่เจอ"
+      >
+        <span className="text-gray-300">{open ? '▾' : '▸'}</span>
+        <span className="font-medium">รหัสที่ระบบข้าม</span>
+        {data && (
+          <span className={totalRows ? 'text-amber-600' : 'text-green-600'}>
+            {totalRows ? `${totalRows.toLocaleString()} รายการ` : 'ไม่มี'}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-2 space-y-2.5">
+          {error && <p className="text-xs text-red-500">{error}</p>}
+          {!data && !error && <p className="text-xs text-gray-400">กำลังตรวจ...</p>}
+
+          {buckets.map(b => (
+            <div key={b.id}>
+              <div className="flex items-center gap-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${SEVERITY[b.severity]?.dot || 'bg-gray-300'}`} />
+                <span className="text-xs font-semibold text-gray-600">{b.label}</span>
+                <span className={`text-[11px] ${SEVERITY[b.severity]?.text || 'text-gray-400'}`}>
+                  {b.rows.toLocaleString()} แถว
+                  {b.copies_sold > 0 && ` · ขายได้ ${b.copies_sold.toLocaleString()} เล่ม`}
+                </span>
+              </div>
+              <p className="text-[11px] text-gray-400 ml-3">{b.effect}</p>
+
+              {b.samples.length > 0 && (
+                <div className="ml-3 mt-1 space-y-0.5">
+                  {b.samples.map((s, i) => (
+                    <div key={`${s.job}-${i}`} className="flex gap-2 text-[11px] text-gray-500">
+                      <span className="font-mono text-gray-400 shrink-0 w-[74px]">{s.job}</span>
+                      <span className="font-mono text-gray-400 shrink-0 w-[96px]">{s.code || '—'}</span>
+                      <span className="shrink-0 w-[52px] text-right">{s.copies_sold.toLocaleString()} เล่ม</span>
+                      {/* รอบสัญญา — บอกว่ารายการนี้จะไปโผล่ตอน generate รอบไหน */}
+                      <span className="shrink-0 w-[46px] text-gray-400">
+                        {s.paidtype ? (s.paidtype.toUpperCase().includes('BI') ? 'BI' : 'Annual') : '—'}
+                      </span>
+                      <span className="truncate">{s.title}</span>
+                    </div>
+                  ))}
+                  {b.rows > b.samples.length && (
+                    <p className="text-[11px] text-gray-300">
+                      …และอีก {(b.rows - b.samples.length).toLocaleString()} แถว
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── History row (one per dataset) ─────────────────────────────────────────────
 
 function HistoryRow({ ds, reports, snapshots, onDeleteDataset, onDeleteReport, onDeleteSnap, onLabelUpdated }) {
@@ -219,6 +307,7 @@ function HistoryRow({ ds, reports, snapshots, onDeleteDataset, onDeleteReport, o
               <span className="font-medium">item ที่ระบบประกอบ</span>
             </a>
           )}
+          <SkippedCodes datasetId={ds.id} />
         </div>
 
         {/* Right: outputs */}
